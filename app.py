@@ -47,9 +47,9 @@ with st.sidebar:
         "anthropic":  {"base_url": "https://api.anthropic.com/v1",            "model": "claude-sonnet-4-5",                      "label": "Anthropic — Claude Sonnet (Paid)"},
         "openai":     {"base_url": "https://api.openai.com/v1",               "model": "gpt-4o-mini",                            "label": "OpenAI — GPT-4o mini (Paid)"},
         "AKI":        {"base_url": "https://aki.io/v1",                       "model": "gpt-oss-120b",                           "label": "AKI — gpt-oss-120b (Paid)"},
-        "denbi-gpt":  {"base_url": "https://denbi-llm-api.bihealth.org/v1",   "model": "gpt-oss-120b",                           "label": "deNBI — gpt-oss-120b"},
-        "denbi-qwen": {"base_url": "https://denbi-llm-api.bihealth.org/v1",   "model": "qwen3.5-fp8",                            "label": "deNBI — qwen3.5-fp8"},
-        "denbi-m25":  {"base_url": "https://denbi-llm-api.bihealth.org/v1",   "model": "m25-reap-172b",                          "label": "deNBI — m25-reap-172b"},
+        "denbi-gpt":  {"base_url": "https://denbi-llm-api-internal.bihealth.org/v1",   "model": "gpt-oss-120b",                           "label": "deNBI — gpt-oss-120b"},
+        "denbi-qwen": {"base_url": "https://denbi-llm-api-internal.bihealth.org/v1",   "model": "qwen3.5-fp8",                            "label": "deNBI — qwen3.5-fp8"},
+        "denbi-m25":  {"base_url": "https://denbi-llm-api-internal.bihealth.org/v1",   "model": "m25-reap-172b",                          "label": "deNBI — m25-reap-172b"},
         "ollama":     {"base_url": "http://localhost:11434/v1",                "model": "llama3",                                 "label": "Ollama — local (Free)"},
         "other":      {"base_url": None,                                       "model": None,                                     "label": "Other (custom)"},
     }
@@ -155,6 +155,33 @@ with st.sidebar:
     RUN_9D = st.checkbox("Target Prioritisation", value=RUN_9A and RUN_9B and RUN_9C, disabled=not (RUN_9A and RUN_9B and RUN_9C), key="run_9d")
     if not _therapeutic_modules_enabled:
         st.caption("⚠️ Therapeutic Landscape requires at least one of: Drug Targets, Disease Associations, Clinical Trials, or GWAS Catalog.")
+
+    st.caption("Configure temperature, thinking, and preserve thinking per module.")
+
+    # Column headers
+    _lm_hdr = st.columns([2.2, 1.2, 1, 1])
+    for _ci, _lbl in enumerate(["Module", "Temperature", "Thinking", "Preserve"]):
+        _lm_hdr[_ci].markdown(
+            f"<span style='font-size:0.78em; color:gray; text-transform:uppercase; "
+            f"letter-spacing:0.05em;'>{_lbl}</span>", unsafe_allow_html=True)
+
+    def _module_row(label, key, default_temp, enabled=True):
+        _cols = st.columns([2.2, 1.2, 1, 1])
+        _cols[0].markdown(f"<span style='font-size:0.9em;'>{label}</span>", unsafe_allow_html=True)
+        _temp    = _cols[1].number_input(" ", min_value=0.0, max_value=2.0, value=default_temp,
+                                         step=0.05, format="%.2f", key=f"{key}_temp",
+                                         disabled=not enabled, label_visibility="collapsed")
+        _think   = _cols[2].checkbox(" ", value=False, key=f"{key}_think",
+                                     disabled=not enabled, label_visibility="collapsed")
+        _preserve = _cols[3].checkbox(" ", value=False, key=f"{key}_preserve",
+                                      disabled=not (enabled and _think), label_visibility="collapsed")
+        return _temp, _think, _preserve
+
+    TEMP_LIT,  THINK_LIT,  PRESERVE_LIT  = _module_row("Lit. Abstract Summary", "lit",  0.10)
+    TEMP_9A,   THINK_9A,   PRESERVE_9A   = _module_row("Lit. Synthesis (9A)",    "9a",   0.20, enabled=RUN_9A)
+    TEMP_9B,   THINK_9B,   PRESERVE_9B   = _module_row("Therapeutic (9B)",       "9b",   0.20, enabled=RUN_9B)
+    TEMP_9C,   THINK_9C,   PRESERVE_9C   = _module_row("Experimental (9C)",      "9c",   0.30, enabled=RUN_9C)
+    TEMP_9D,   THINK_9D,   PRESERVE_9D   = _module_row("Target Prio. (9D)",      "9d",   0.10, enabled=RUN_9D)
 
     st.divider()
 
@@ -551,6 +578,7 @@ def build_core_system(context_desc):
 def synthesise_literature(gene, protein_name, refseq_summary, articles,
                            llm, LLM_MODEL, MAX_ABSTRACTS_PER_GENE,
                            LLM_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT, OTHER_CONTEXT,
+                           temperature=0.1, enable_thinking=False, preserve_thinking=False,
                            log=print):
     if not articles:
         return "No abstracts available for synthesis.", 0
@@ -572,12 +600,18 @@ def synthesise_literature(gene, protein_name, refseq_summary, articles,
         + f"\n{refseq_ctx}"
         + f"Abstracts (ranked highest citations first):\n{context}"
     )
+    extra_body = {}
+    if enable_thinking:
+        extra_body["enable_thinking"] = True
+        extra_body["preserve_thinking"] = preserve_thinking
     try:
         resp   = llm.chat.completions.create(
             model=LLM_MODEL,
             messages=[{"role": "system", "content": build_core_system(context_desc)},
                       {"role": "user",   "content": user_msg}],
-            temperature=0.1, timeout=60)
+            temperature=temperature,
+            timeout=60,
+            **({"extra_body": extra_body} if extra_body else {}))
         text   = resp.choices[0].message.content.strip()
         tokens = resp.usage.total_tokens if resp.usage else 0
         return text, tokens
@@ -1049,7 +1083,9 @@ if run_button:
         llm_synthesis, tokens = synthesise_literature(
             gene, protein_name, refseq_summary, articles,
             llm, LLM_MODEL, MAX_ABSTRACTS_PER_GENE,
-            LLM_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT, OTHER_CONTEXT, log)
+            LLM_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT, OTHER_CONTEXT,
+            temperature=TEMP_LIT, enable_thinking=THINK_LIT,
+            preserve_thinking=PRESERVE_LIT, log=log)
         total_tokens += tokens
 
         pmid_to_idx        = {a["pmid"]: idx + 1 for idx, a in enumerate(articles)}
@@ -1342,14 +1378,21 @@ if st.session_state.pipeline_done:
                         f"</study_context>\n\n<per_gene_data>\n{digest_text}\n</per_gene_data>"
                     )
 
-                def run_llm_section(label, system_prompt, user_msg, temperature=0.3):
+                def run_llm_section(label, system_prompt, user_msg, temperature=0.3,
+                                    enable_thinking=False, preserve_thinking=False):
                     t0 = time.time()
+                    extra_body = {}
+                    if enable_thinking:
+                        extra_body["enable_thinking"] = True
+                        extra_body["preserve_thinking"] = preserve_thinking
                     try:
                         resp = llm.chat.completions.create(
                             model=LLM_MODEL,
                             messages=[{"role": "system", "content": system_prompt},
                                       {"role": "user",   "content": user_msg}],
-                            temperature=temperature, timeout=120)
+                            temperature=temperature,
+                            timeout=120,
+                            **({"extra_body": extra_body} if extra_body else {}))
                         elapsed = time.time() - t0
                         return resp.choices[0].message.content, (resp.usage.total_tokens if resp.usage else 0), elapsed
                     except Exception as e:
@@ -1415,7 +1458,11 @@ Based on the synthesised findings above, assess the overall reliability of the s
 
                     if should_run["9a"] and not synthesis_results.get("9a"):
                         with st.spinner("9a — Biological Synthesis..."):
-                            text, tok, rt = run_llm_section("9a", SYS_9A, make_user_msg(digest))
+                            text, tok, rt = run_llm_section(
+                                "9a", SYS_9A, make_user_msg(digest),
+                                temperature=TEMP_9A,
+                                enable_thinking=THINK_9A,
+                                preserve_thinking=PRESERVE_9A)
                             synthesis_results["9a"] = text
                             run_metrics["9a"] = {"tokens": tok, "runtime": rt}
                     else:
@@ -1440,9 +1487,12 @@ OUTPUT FORMAT:
 - Confidence and caveat: one brief phrase drawn from the Confidence and caveats section of the synthesis.
 - Output the title line and table only — no preamble, no commentary, no extra headings."""
                         with st.spinner("9a — Compact table..."):
-                            table_text, tok, rt = run_llm_section("9a-table", SYS_9A_TABLE,
-                                                            f"<section_text>\n{text}\n</section_text>",
-                                                            temperature=0.1)
+                            table_text, tok, rt = run_llm_section(
+                                "9a-table", SYS_9A_TABLE,
+                                f"<section_text>\n{text}\n</section_text>",
+                                temperature=TEMP_9A,
+                                enable_thinking=THINK_9A,
+                                preserve_thinking=PRESERVE_9A)
                             synthesis_tables["9a"] = table_text
                             run_metrics["9a-table"] = {"tokens": tok, "runtime": rt}
 
@@ -1476,7 +1526,11 @@ Table columns: | Rank | Target | Evidence basis | Justification (≤25 words) | 
 
                     if should_run["9b"] and not synthesis_results.get("9b"):
                         with st.spinner("9b — Therapeutic Landscape..."):
-                            text, tok, rt = run_llm_section("9b", SYS_9B, make_user_msg(digest))
+                            text, tok, rt = run_llm_section(
+                                "9b", SYS_9B, make_user_msg(digest),
+                                temperature=TEMP_9B,
+                                enable_thinking=THINK_9B,
+                                preserve_thinking=PRESERVE_9B)
                             synthesis_results["9b"] = text
                             run_metrics["9b"] = {"tokens": tok, "runtime": rt}
 
@@ -1522,7 +1576,11 @@ Table columns: | # | Experiment type | Model system | Perturbation | Primary rea
 
                     if should_run["9c"] and not synthesis_results.get("9c"):
                         with st.spinner("9c — Experimental Proposals..."):
-                            text, tok, rt = run_llm_section("9c", SYS_9C, user_9c)
+                            text, tok, rt = run_llm_section(
+                                "9c", SYS_9C, user_9c,
+                                temperature=TEMP_9C,
+                                enable_thinking=THINK_9C,
+                                preserve_thinking=PRESERVE_9C)
                             synthesis_results["9c"] = text
                             run_metrics["9c"] = {"tokens": tok, "runtime": rt}
 
@@ -1569,14 +1627,30 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
 
                     if should_run["9d"] and not synthesis_results.get("9d"):
                         with st.spinner("9d — Top Target Summary..."):
-                            text, tok, rt = run_llm_section("9d", SYS_9D, user_9d, temperature=0.1)
+                            text, tok, rt = run_llm_section(
+                                "9d", SYS_9D, user_9d,
+                                temperature=TEMP_9D,
+                                enable_thinking=THINK_9D,
+                                preserve_thinking=PRESERVE_9D)
                             synthesis_results["9d"] = text
                             run_metrics["9d"] = {"tokens": tok, "runtime": rt}
 
-                    # Persist to session_state
                     st.session_state.synthesis_results = synthesis_results
                     st.session_state.synthesis_tables  = synthesis_tables
-                    st.session_state.run_metrics       = run_metrics
+                    # Store per-module settings alongside metrics for display
+                    for _key, _temp, _think, _preserve in [
+                        ("core",     TEMP_LIT, THINK_LIT, PRESERVE_LIT),
+                        ("9a",       TEMP_9A,  THINK_9A,  PRESERVE_9A),
+                        ("9a-table", TEMP_9A,  THINK_9A,  PRESERVE_9A),
+                        ("9b",       TEMP_9B,  THINK_9B,  PRESERVE_9B),
+                        ("9c",       TEMP_9C,  THINK_9C,  PRESERVE_9C),
+                        ("9d",       TEMP_9D,  THINK_9D,  PRESERVE_9D),
+                    ]:
+                        if _key in run_metrics:
+                            run_metrics[_key]["temperature"]       = _temp
+                            run_metrics[_key]["enable_thinking"]   = _think
+                            run_metrics[_key]["preserve_thinking"] = _preserve
+                    st.session_state.run_metrics = run_metrics
 
                 # ── Run metrics summary ───────────────────────────────────────
                 _metrics = st.session_state.run_metrics
@@ -1596,17 +1670,23 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                         m = _metrics.get(key)
                         if m:
                             _metric_rows.append({
-                                "Section":  label,
-                                "Tokens":   f"{m['tokens']:,}",
-                                "Runtime":  fmt_runtime(m["runtime"]),
+                                "Section":          label,
+                                "Temperature":      f"{m.get('temperature', '—')}",
+                                "Thinking":         "✓" if m.get("enable_thinking") else "—",
+                                "Preserve":         "✓" if m.get("preserve_thinking") else "—",
+                                "Tokens":           f"{m['tokens']:,}",
+                                "Runtime":          fmt_runtime(m["runtime"]),
                             })
                             total_llm_tok += m["tokens"]
                             total_llm_rt  += m["runtime"]
                     if _metric_rows:
                         _metric_rows.append({
-                            "Section": "**Total**",
-                            "Tokens":  f"**{total_llm_tok:,}**",
-                            "Runtime": f"**{fmt_runtime(total_llm_rt)}**",
+                            "Section":     "**Total**",
+                            "Temperature": "—",
+                            "Thinking":    "—",
+                            "Preserve":    "—",
+                            "Tokens":      f"**{total_llm_tok:,}**",
+                            "Runtime":     f"**{fmt_runtime(total_llm_rt)}**",
                         })
                     st.markdown("#### Run Summary")
                     st.dataframe(pd.DataFrame(_metric_rows), use_container_width=True, hide_index=True)
@@ -1669,15 +1749,24 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                 ("9c",       "9C — Experimental Proposals"),
                 ("9d",       "9D — Target Prioritisation"),
             ]
-            _mlines = ["## Run Summary\n", "| Section | Tokens | Runtime |", "| --- | ---: | --- |"]
+            _mlines = [
+                "## Run Summary\n",
+                "| Section | Temperature | Thinking | Preserve | Tokens | Runtime |",
+                "| --- | ---: | :---: | :---: | ---: | --- |",
+            ]
             total_tok, total_rt = 0, 0.0
             for key, label in _section_map:
                 m = _metrics.get(key)
                 if m:
-                    _mlines.append(f"| {label} | {m['tokens']:,} | {fmt_runtime(m['runtime'])} |")
+                    _mlines.append(
+                        f"| {label} | {m.get('temperature', '—')} "
+                        f"| {'✓' if m.get('enable_thinking') else '—'} "
+                        f"| {'✓' if m.get('preserve_thinking') else '—'} "
+                        f"| {m['tokens']:,} | {fmt_runtime(m['runtime'])} |"
+                    )
                     total_tok += m["tokens"]
                     total_rt  += m["runtime"]
-            _mlines.append(f"| **Total** | **{total_tok:,}** | **{fmt_runtime(total_rt)}** |")
+            _mlines.append(f"| **Total** | — | — | — | **{total_tok:,}** | **{fmt_runtime(total_rt)}** |")
             _metrics_md = "\n".join(_mlines) + "\n\n---\n"
 
         _meta = [
