@@ -15,10 +15,10 @@ from openai import OpenAI
 # All pipeline outputs live here so they survive Streamlit re-runs
 # (which happen on every widget interaction, including download button clicks).
 for _key in ("results", "go_bp_data", "reactome_data",
-             "synthesis_results", "synthesis_tables", "pipeline_done"):
+             "synthesis_results", "synthesis_tables", "pipeline_done", "run_metrics"):
     if _key not in st.session_state:
         st.session_state[_key] = [] if _key in ("results","go_bp_data","reactome_data") \
-                                  else ({} if _key in ("synthesis_results","synthesis_tables") \
+                                  else ({} if _key in ("synthesis_results","synthesis_tables","run_metrics") \
                                   else False)
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -520,19 +520,31 @@ def build_context_desc(LLM_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT, OTHER_CONTEXT)
     return " | ".join(context_parts) if context_parts else "a biological context"
 
 
+def fmt_runtime(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    h, rem = divmod(seconds, 3600)
+    m, s   = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    return f"{m}m {s}s"
+
+
 def build_core_system(context_desc):
     return (
-        f"You are a biomedical research analyst specialising in {context_desc}. "
-        "You are given a gene RefSeq summary and ranked PubMed abstracts. "
-        "Write a single synthesis paragraph: exactly one sentence per abstract, "
-        "in the order they are provided.\n\n"
-        "Rules:\n"
-        "- Every sentence must end with a PMID citation: [PMID: XXXXX].\n"
-        "- If multiple abstracts support the same claim, combine citations: [PMID: 12345, PMID: 67890].\n"
-        "- Only cite PMIDs from the abstracts provided. Never invent citations.\n"
-        "- Focus on mechanistic findings relevant to the context above.\n"
-        "- Do not restate the RefSeq summary verbatim.\n\n"
-        "Respond with the synthesis paragraph only. No headers, no preamble, no JSON."
+        f"You are a biomedical research analyst specialising in {context_desc}, extracting gene-level mechanistic findings from primary literature to orient a research team.\n\n"
+        "CONSTRAINTS:\n"
+        "- The gene is always the grammatical subject — each sentence must describe what the gene does, not what the study did.\n"
+        "- Mechanistic findings take priority over clinical or epidemiological ones.\n"
+        "- Only use PMIDs from the provided abstracts. Never invent citations.\n"
+        "- Use the RefSeq summary only as background — do not restate it.\n\n"
+        "TASK: Write a single synthesis paragraph integrating the provided PubMed abstracts into a mechanistic narrative about the gene.\n\n"
+        "OUTPUT FORMAT:\n"
+        "- Write one sentence per distinct finding. If two abstracts support the same finding, merge them into one sentence.\n"
+        "- End every sentence with its PMID citation(s): [PMID: XXXXX] or [PMID: XXXXX, PMID: YYYYY].\n"
+        "- Do not begin the paragraph with the gene name or a summary sentence.\n"
+        "- Output the paragraph only — no title, no preamble, no JSON, no markdown."
     )
 
 
@@ -1058,13 +1070,17 @@ if run_button:
         })
 
     prog.progress(1.0, text="Core pipeline complete ✓")
-    log(f"\nCore pipeline complete — {sum(1 for r in results if r.get('status')=='OK')} OK | {total_tokens:,} tokens")
+    core_elapsed = time.time() - pipeline_start
+    log(f"\nCore pipeline complete — {sum(1 for r in results if r.get('status')=='OK')} OK | {total_tokens:,} tokens | {fmt_runtime(core_elapsed)}")
 
     # ── Persist to session_state so downloads don't wipe results ─────────────
     st.session_state.results       = results
     st.session_state.go_bp_data    = go_bp_data
     st.session_state.reactome_data = reactome_data
     st.session_state.pipeline_done = True
+    st.session_state.run_metrics   = {
+        "core": {"tokens": total_tokens, "runtime": core_elapsed},
+    }
 
     # ══════════════════════════════════════════════════════════════════════════
     # DISPLAY RESULTS
@@ -1327,15 +1343,17 @@ if st.session_state.pipeline_done:
                     )
 
                 def run_llm_section(label, system_prompt, user_msg, temperature=0.3):
+                    t0 = time.time()
                     try:
                         resp = llm.chat.completions.create(
                             model=LLM_MODEL,
                             messages=[{"role": "system", "content": system_prompt},
                                       {"role": "user",   "content": user_msg}],
                             temperature=temperature, timeout=120)
-                        return resp.choices[0].message.content, (resp.usage.total_tokens if resp.usage else 0)
+                        elapsed = time.time() - t0
+                        return resp.choices[0].message.content, (resp.usage.total_tokens if resp.usage else 0), elapsed
                     except Exception as e:
-                        return f"LLM call failed: {e}", 0
+                        return f"LLM call failed: {e}", 0, time.time() - t0
 
                 synthesis_results = st.session_state.synthesis_results
                 synthesis_tables  = st.session_state.synthesis_tables
@@ -1358,79 +1376,142 @@ if st.session_state.pipeline_done:
                 if not already_done:
                     # ── Only runs once; skipped on re-runs from downloads ─────
                     digest = "\n\n".join(build_digest(r) for r in successful)
+                    run_metrics = st.session_state.run_metrics
 
-                    SYS_9A = f"""You are a cell biologist {persona_context}.
-Integrate the provided per-gene evidence into a mechanistically coherent synthesis of how these genes relate to {context_desc}.
-Use markdown and the headings below exactly.
+                    SYS_9A = f"""You are a cell biologist {persona_context}, synthesising patterns across a gene set to provide a high-level mechanistic landscape for a research team.
 
-Use only the provided per-gene data. Do not introduce unsupported genes, pathways, cell types, causal claims, or disease mechanisms. Treat missing or toggled-off data as unavailable evidence, not negative evidence.
+CONSTRAINTS (apply to every section):
+- Use only the provided per-gene data. Do not introduce unsupported genes, pathways, cell types, or causal claims.
+- Treat missing or toggled-off fields as unavailable evidence, not as negative evidence.
+- Do not repeatedly focus on the same small subset of genes — represent the breadth of the gene set where evidence permits.
+- For all bullet points, format each bullet as: **Name**: one sentence describing which genes are involved and their role.
+- Aim for concision — this is an orientation document for a research team, not an exhaustive review.
+- If a section cannot be supported by the data, write: "Insufficient data to assess."
+
+TASK: Synthesise the per-gene evidence into a mechanistic landscape for the context: {context_desc}. The goal is to identify patterns and themes that orient a research team toward the most meaningful biology, not to exhaustively describe every gene.
+
+OUTPUT FORMAT: Markdown only. Use the headings below in exactly this order. Do not add extra headings, a conclusion, or a preamble.
 
 ## Overview
-Write 3-5 sentences summarising the dominant mechanistic theme emerging from the full gene set in the context of {context_desc}.
+3–5 sentences on the dominant mechanistic patterns emerging from the gene set in the context of {context_desc}. Stay at the theme level — individual genes should only appear here as exemplars of a broader pattern.
 
 ## Key biological pathways
-Identify the main pathways or functional modules represented by the genes as separate bullet points. Limit to 5 modules maximum.
+Up to 5 bullet points representing the major functional modules across the gene set.
 
 ## Upstream drivers vs downstream effectors
-Classify genes into upstream regulators, signalling intermediates, and downstream effectors.
+Classify genes into exactly three categories. For each, list the relevant genes and explain why they belong there, noting where genes co-operate. Genes with ambiguous roles or insufficient evidence should be noted as such within the most likely category rather than omitted.
+**Upstream regulators**: ...
+**Signalling intermediates**: ...
+**Downstream effectors**: ...
 
 ## Cross-gene interactions
-Describe regulatory or pathway-level relationships among the genes. Limit to 5 points.
+Up to 5 bullet points describing direct or indirect functional relationships between specific genes — e.g. one gene regulating another's expression, synergistic activity, or shared complex membership. Weaker or inferred interactions are permitted and should be flagged in Confidence and caveats.
 
 ## Confidence and caveats
-Categorise findings into: Supported Conclusions, Cautious Inferences, and Heterogeneity."""
+Based on the synthesised findings above, assess the overall reliability of the synthesis.
+- **Supported conclusions**: patterns or findings consistent across multiple genes with direct mechanistic evidence.
+- **Cautious inferences**: findings resting on a single gene, indirect evidence, or inferred interactions from Cross-gene interactions.
+- **Heterogeneity or gaps**: genes with sparse data, conflicting findings, or not represented in the synthesis — name them explicitly."""
 
                     if should_run["9a"] and not synthesis_results.get("9a"):
                         with st.spinner("9a — Biological Synthesis..."):
-                            text, _ = run_llm_section("9a", SYS_9A, make_user_msg(digest))
+                            text, tok, rt = run_llm_section("9a", SYS_9A, make_user_msg(digest))
                             synthesis_results["9a"] = text
+                            run_metrics["9a"] = {"tokens": tok, "runtime": rt}
                     else:
                         text = synthesis_results.get("9a", "")
 
                     if text and not text.startswith("LLM call failed"):
-                        SYS_9A_TABLE = (
-                            f"You are a cell biologist {persona_context}.\n"
-                            "Compress the provided biological synthesis into a single compact markdown table.\n"
-                            "Return exactly one markdown table with title: ### Compact Biological Summary\n"
-                            "Columns: | Functional module | Representative genes | Mechanistic role | Confidence and caveat |\n"
-                            "Return the title and table only."
-                        )
+                        SYS_9A_TABLE = f"""You are a cell biologist {persona_context}, compressing a mechanistic gene set synthesis into a scannable summary table for a research team.
+
+CONSTRAINTS:
+- Use only the findings from the provided biological synthesis. Do not introduce new information.
+- Aim for concision — each cell should be specific enough to be informative but brief enough to scan.
+- If the synthesis cannot support 3 rows of distinct findings, write: "Insufficient data to assess."
+
+TASK: Compress the provided biological synthesis into a single compact markdown table summarising the key mechanistic landscape across the gene set.
+
+OUTPUT FORMAT:
+- Output exactly one line before the table: ### Compact Biological Summary
+- Then output exactly one markdown table with these columns:
+  | Functional module | Representative genes | Mechanistic role | Confidence and caveat |
+- 3 to 5 rows. Each row represents one functional module from the synthesis.
+- Mechanistic role: one sentence, gene-centred, specific to the context.
+- Confidence and caveat: one brief phrase drawn from the Confidence and caveats section of the synthesis.
+- Output the title line and table only — no preamble, no commentary, no extra headings."""
                         with st.spinner("9a — Compact table..."):
-                            table_text, _ = run_llm_section("9a-table", SYS_9A_TABLE,
+                            table_text, tok, rt = run_llm_section("9a-table", SYS_9A_TABLE,
                                                             f"<section_text>\n{text}\n</section_text>",
                                                             temperature=0.1)
                             synthesis_tables["9a"] = table_text
+                            run_metrics["9a-table"] = {"tokens": tok, "runtime": rt}
 
-                    SYS_9B = f"""You are a translational pharmacologist {persona_context}.
-Produce a therapeutic landscape assessment for the provided gene set in the context of {context_desc}.
-Use markdown and these exact headings:
+                    SYS_9B = f"""You are a drug discovery scientist {persona_context}, assessing the therapeutic landscape of a gene set to orient a research team toward the most actionable opportunities.
+
+CONSTRAINTS (apply to every section):
+- Base therapeutic reasoning on the provided drug, clinical trial, disease association, and GWAS data as the primary evidence layer.
+- Use the biological synthesis from the previous section — RefSeq summaries, literature findings, and pathway context — as a mechanistic grounding layer to inform and enrich your reasoning, not as primary evidence.
+- Do not overstate novelty — a target may be flagged as potentially novel or underexplored only if strong mechanistic or disease association evidence supports it.
+- Targets with no evidence across any layer should be noted as insufficient data and excluded from ranking.
+- Aim for concision — this is an orientation document for a research team, not an exhaustive review.
+- If a section cannot be supported by the data, write: "Insufficient data to assess."
+
+TASK: Produce a therapeutic landscape assessment for the provided gene set in the context of {context_desc}. The goal is to surface the most actionable therapeutic opportunities and gaps across the gene set, grounded in both the therapeutic evidence and the mechanistic context.
+
+OUTPUT FORMAT: Markdown only. Use the headings below in exactly this order. Do not add extra headings, a conclusion, or a preamble.
 
 ## Overview
-3-5 sentences on therapeutic maturity of this gene set.
+Exactly 4 sentences:
+1. The overall therapeutic maturity of this gene set.
+2. Which evidence layer is strongest across the set — drug, clinical trial, disease association, or GWAS.
+3. The most compelling therapeutic opportunity and why.
+4. The most significant gap or unmet need across the gene set.
 
 ## Most promising targets
-Rank up to 10 targets. Table columns: Rank | Target | Justification for Ranking | Caveat."""
+Rank at least 5 but up to 10 targets with available evidence. If fewer than 5 targets have sufficient evidence to rank, include all available and note the limited coverage in the Overview.
+For each target, the justification must explicitly reference the evidence it draws from — drug data, clinical trial status, OT association score, or GWAS hit — and be grounded by the mechanistic context where relevant.
+Targets with no drug evidence but strong mechanistic or disease association support should be flagged as Potentially novel.
+Targets with an existing drug but no clinical trial evidence should be flagged as Potentially underexplored.
+Table columns: | Rank | Target | Evidence basis | Justification (≤25 words) | Novelty flag | Caveat (≤15 words) |"""
 
                     if should_run["9b"] and not synthesis_results.get("9b"):
                         with st.spinner("9b — Therapeutic Landscape..."):
-                            text, _ = run_llm_section("9b", SYS_9B, make_user_msg(digest))
+                            text, tok, rt = run_llm_section("9b", SYS_9B, make_user_msg(digest))
                             synthesis_results["9b"] = text
+                            run_metrics["9b"] = {"tokens": tok, "runtime": rt}
 
-                    SYS_9C = f"""You are an experimental biologist {persona_context}.
-Propose targeted experiments to validate the most promising hypotheses from the gene set in the context of {context_desc}.
-Use markdown and these exact headings:
+                    SYS_9C = f"""You are a translational experimental biologist {persona_context}, proposing experiments to validate the most meaningful hypotheses emerging from a gene set analysis to orient a research team toward actionable next steps.
+
+CONSTRAINTS (apply to every section):
+- Derive all hypotheses from the provided per-gene data, biological synthesis, and therapeutic landscape as a whole — do not generate hypotheses from general knowledge alone.
+- Each hypothesis must be falsifiable and grounded in at least one evidence layer from the input.
+- Do not overstate experimental feasibility — flag practical limitations honestly in the caveat.
+- Aim for concision — this is an orientation document for a research team, not an exhaustive review.
+- If a section cannot be supported by the data, write: "Insufficient data to assess."
+
+TASK: Propose experiments to validate the most promising hypotheses from the gene set in the context of {context_desc}. The goal is to identify the most tractable and informative experiments that a research team could prioritise, grounded in the biological and therapeutic evidence provided.
+
+OUTPUT FORMAT: Markdown only. Use the headings below in exactly this order. Do not add extra headings, a conclusion, or a preamble.
 
 ## Overview
-3-5 sentences on overall experimental tractability.
+Exactly 3 sentences:
+1. The overall experimental tractability of this gene set.
+2. Which 1–2 targets are the most experimentally accessible and why.
+3. The main practical limitation or gap across the gene set.
 
 ## Experimental hypotheses
-2-3 falsifiable hypotheses. Table: Hypothesis | Rationale | Caveat.
+2 to 3 hypotheses, each as a falsifiable statement in the form: "Gene X does Y in the context of Z."
+Table columns: | # | Hypothesis | Evidence basis | Key assumption | Caveat |
+- Evidence basis: the specific evidence layer(s) this hypothesis is drawn from — per-gene data, biological synthesis, or therapeutic landscape.
+- Key assumption: the main unstated premise that must hold for the hypothesis to be testable.
+- Caveat: the most significant limitation or risk to testing this hypothesis.
 
-## Proposed in vitro experiments
-Table: Hypothesis | Model system | Perturbation | Comparator groups | Outcome measures | Caveat.
-
-## Proposed in vivo experiments
-Table: Hypothesis | Model system | Perturbation | Comparator groups | Outcome measures | Caveat."""
+## Proposed experiments
+One or more experiments per hypothesis where warranted. The model should determine the most appropriate experiment type — in vitro, in vivo, ex vivo, or patient-derived — based on the hypothesis and the available evidence. Justify the choice of experiment type in the Rationale column.
+Table columns: | # | Experiment type | Model system | Perturbation | Primary readout | Rationale for experiment type | Caveat |
+- Experiment type: in vitro / in vivo / ex vivo / patient-derived.
+- Primary readout: the specific measurable outcome that would confirm or refute the hypothesis — be precise enough that a researcher could design the experiment from this description.
+- Rationale for experiment type: one brief phrase explaining why this experiment type is most appropriate for this hypothesis."""
 
                     prior_9ab = ""
                     if synthesis_tables.get("9a"):
@@ -1441,20 +1522,45 @@ Table: Hypothesis | Model system | Perturbation | Comparator groups | Outcome me
 
                     if should_run["9c"] and not synthesis_results.get("9c"):
                         with st.spinner("9c — Experimental Proposals..."):
-                            text, _ = run_llm_section("9c", SYS_9C, user_9c)
+                            text, tok, rt = run_llm_section("9c", SYS_9C, user_9c)
                             synthesis_results["9c"] = text
+                            run_metrics["9c"] = {"tokens": tok, "runtime": rt}
 
-                    SYS_9D = f"""You are a drug discovery scientist {persona_context}.
-Produce a focused target prioritisation summary for the provided gene set in the context of {context_desc}.
-Use markdown and this exact heading:
+                    SYS_9D = f"""You are a drug discovery scientist {persona_context}, synthesising all available evidence across biological, therapeutic, and disease association layers to produce a final integrated target prioritisation for a research team.
+
+CONSTRAINTS (apply to every section):
+- Base prioritisation on all provided evidence layers: per-gene data, biological synthesis, therapeutic landscape, disease associations, and GWAS data.
+- Apply the following ranking hierarchy per target:
+    1. Strength of disease association and GWAS evidence — direct genetic or associative links to the disease context.
+    2. Therapeutic evidence — existing drugs, clinical trial status, and OT association scores.
+    3. Mechanistic specificity — how well-characterised is the gene's role in the disease pathway from the biological synthesis.
+- Overall priority criteria:
+    High: strong evidence across all three criteria, with disease association always required.
+    Medium: strong evidence in one or two criteria, or moderate evidence across all three.
+    Low: evidence in only one criterion, or weak evidence across multiple.
+    N/A: no evidence across any layer — exclude from ranking.
+- Overall priority values are strictly: High / Medium / Low. No intermediate values.
+- Aim for concision — this is an orientation document for a research team, not an exhaustive review.
+- If a section cannot be supported by the data, write: "Insufficient data to assess."
+
+TASK: Produce an integrated target prioritisation for the provided gene set in the context of {context_desc}. The goal is to synthesise all evidence layers into a clear, actionable recommendation that a research team can use to focus their efforts.
+
+OUTPUT FORMAT: Markdown only. Use the headings below in exactly this order. Do not add extra headings, a conclusion, or a preamble.
+
+## Overview
+Exactly 4 sentences:
+1. A clear recommendation on where the research team should focus based on the full evidence across the gene set.
+2. The top 1–2 targets and the specific evidence that makes them the strongest candidates.
+3. The most significant opportunity or gap that the ranking reveals.
+4. One sentence on what would most change this prioritisation if new evidence became available.
 
 ## Top target summary
-Rank up to 10 targets. Table columns:
-| Gene | Protein name | Main strength | Main caveat | Limitations | Overall priority |
-Allowed values for Overall priority: High / Medium / Low / N/A.
-
-After the table, add a transparency statement:
-"Ranking confidence: [X] of [total] genes had sufficient data for confident ranking. [Y] gene(s) were ranked with limited evidence: [symbols]." """
+Rank at least 5 but up to 10 targets with available evidence. If fewer than 5 targets have sufficient evidence to rank, include all available and note the limited coverage in the Overview.
+Table columns: | Rank | Gene | Protein name | Disease association and GWAS | Therapeutic evidence | Mechanistic specificity | Overall priority |
+- Disease association and GWAS: one phrase summarising the strength of genetic or associative evidence.
+- Therapeutic evidence: one phrase summarising drug, trial, or OT score evidence.
+- Mechanistic specificity: one phrase on how well-characterised the gene's role is in the disease pathway.
+- Overall priority: High / Medium / Low only, applied strictly using the ranking criteria above."""
 
                     prior_9abd = prior_9ab
                     if synthesis_results.get("9c"):
@@ -1463,12 +1569,48 @@ After the table, add a transparency statement:
 
                     if should_run["9d"] and not synthesis_results.get("9d"):
                         with st.spinner("9d — Top Target Summary..."):
-                            text, _ = run_llm_section("9d", SYS_9D, user_9d, temperature=0.1)
+                            text, tok, rt = run_llm_section("9d", SYS_9D, user_9d, temperature=0.1)
                             synthesis_results["9d"] = text
+                            run_metrics["9d"] = {"tokens": tok, "runtime": rt}
 
                     # Persist to session_state
                     st.session_state.synthesis_results = synthesis_results
                     st.session_state.synthesis_tables  = synthesis_tables
+                    st.session_state.run_metrics       = run_metrics
+
+                # ── Run metrics summary ───────────────────────────────────────
+                _metrics = st.session_state.run_metrics
+                if _metrics:
+                    _metric_rows = []
+                    _section_map = [
+                        ("core",     "Core pipeline (per-gene LLM)"),
+                        ("9a",       "9A — Biological Synthesis"),
+                        ("9a-table", "9A — Compact Table"),
+                        ("9b",       "9B — Therapeutic Landscape"),
+                        ("9c",       "9C — Experimental Proposals"),
+                        ("9d",       "9D — Target Prioritisation"),
+                    ]
+                    total_llm_tok = 0
+                    total_llm_rt  = 0.0
+                    for key, label in _section_map:
+                        m = _metrics.get(key)
+                        if m:
+                            _metric_rows.append({
+                                "Section":  label,
+                                "Tokens":   f"{m['tokens']:,}",
+                                "Runtime":  fmt_runtime(m["runtime"]),
+                            })
+                            total_llm_tok += m["tokens"]
+                            total_llm_rt  += m["runtime"]
+                    if _metric_rows:
+                        _metric_rows.append({
+                            "Section": "**Total**",
+                            "Tokens":  f"**{total_llm_tok:,}**",
+                            "Runtime": f"**{fmt_runtime(total_llm_rt)}**",
+                        })
+                    st.markdown("#### Run Summary")
+                    st.dataframe(pd.DataFrame(_metric_rows), use_container_width=True, hide_index=True)
+                    st.markdown("---")
 
                 # ── Display (runs every render, cached or freshly generated) ──
                 section_labels = [
@@ -1516,6 +1658,28 @@ After the table, add a transparency statement:
         prefix   = f"{ts}_{ANALYSIS_NAME}_{safe_ctx}"
 
         # ── Build Markdown once ───────────────────────────────────────────────
+        _metrics = st.session_state.run_metrics
+        _metrics_md = ""
+        if _metrics:
+            _section_map = [
+                ("core",     "Core pipeline (per-gene LLM)"),
+                ("9a",       "9A — Biological Synthesis"),
+                ("9a-table", "9A — Compact Table"),
+                ("9b",       "9B — Therapeutic Landscape"),
+                ("9c",       "9C — Experimental Proposals"),
+                ("9d",       "9D — Target Prioritisation"),
+            ]
+            _mlines = ["## Run Summary\n", "| Section | Tokens | Runtime |", "| --- | ---: | --- |"]
+            total_tok, total_rt = 0, 0.0
+            for key, label in _section_map:
+                m = _metrics.get(key)
+                if m:
+                    _mlines.append(f"| {label} | {m['tokens']:,} | {fmt_runtime(m['runtime'])} |")
+                    total_tok += m["tokens"]
+                    total_rt  += m["runtime"]
+            _mlines.append(f"| **Total** | **{total_tok:,}** | **{fmt_runtime(total_rt)}** |")
+            _metrics_md = "\n".join(_mlines) + "\n\n---\n"
+
         _meta = [
             "# Gene Research Report\n",
             f"**Analysis name:** {ANALYSIS_NAME}  ",
@@ -1560,7 +1724,7 @@ After the table, add a transparency statement:
             if _synth_tables.get(key):
                 _meta.append(_synth_tables[key])
 
-        md_content = "\n".join(_meta)
+        md_content = _metrics_md + "\n".join(_meta)
 
         # ── Build HTML from Markdown ──────────────────────────────────────────
         try:
