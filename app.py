@@ -29,7 +29,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🐐 GOAT — Gene Ontology & Analysis Tool")
+st.title("🐐 GOAT — investiGating biOlogical insights And hypoThesis")
 st.caption("Comprehensive literature mining + optional downstream enrichment")
 
 # ══════════════════════════════════════════════════════════════════════════════
