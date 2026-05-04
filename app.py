@@ -15,8 +15,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── Profile credentials (loaded from .env, never exposed to browser) ───────────
-_BILLY_PASSWORD   = os.environ.get("BILLY_PASSWORD", "")
-_GOAT_PASSWORD    = os.environ.get("GOAT_PASSWORD", "")
 _DENBI_PASSPHRASE = os.environ.get("DENBI_PASSPHRASE", "")
 _DENBI_API_KEY    = os.environ.get("DENBI_API_KEY", "")
 
@@ -98,177 +96,144 @@ with st.sidebar:
     is_billy = selected_profile == "Billy — Guided"
     is_goat  = selected_profile == "Mountain Goat — Explorer"
 
-    pw_input = st.text_input("Password", type="password", placeholder="Enter profile password", key="profile_pw")
+    st.divider()
 
-    expected_pw = _BILLY_PASSWORD if is_billy else _GOAT_PASSWORD
-    _auth_ok    = (pw_input == expected_pw) if expected_pw else False
+    # ── LLM provider ──────────────────────────────────────────────────────
+    st.subheader("LLM Provider")
 
-    if pw_input and not _auth_ok:
-        st.error("Incorrect password.")
-    if not pw_input:
-        st.caption("Enter the profile password to unlock the configuration.")
+    if is_billy:
+        # ── Billy: deNBI or Groq only ─────────────────────────────────────
+        billy_provider = st.selectbox(
+            "Provider",
+            options=["deNBI", "Groq"],
+            key="billy_provider",
+        )
 
-    if not _auth_ok:
-        # Render placeholder disabled widgets so layout doesn't jump on unlock
-        st.divider()
-        st.info("Configuration locked. Enter the correct password above.")
-        # Provide safe defaults so downstream code doesn't NameError
-        LLM_BASE_URL = ""; LLM_MODEL = ""; API_KEY = ""; PROVIDER = ""
-        genes_raw = ""; UNIPROT_ORGANISM = "Homo sapiens"; ANALYSIS_NAME = ""
-        DISEASE_CONTEXT = ""; ORGAN_CONTEXT = ""; OTHER_CONTEXT = ""; NOTES = ""
-        MAX_ABSTRACTS_PER_GENE = 5; YEAR_FROM = 2020; FALLBACK_STEPS = [2015,2010,2005,2000]
-        ENABLE_GO_PATHWAYS = True; ENABLE_DRUG_TARGETS = True
-        ENABLE_DISEASE_ASSOCIATION = True; ENABLE_CLINICAL_TRIALS = True; ENABLE_GWAS = True
-        RUN_9A = True; RUN_9B = True; RUN_9C = True; RUN_9D = True
-        TEMP_LIT=0.10; THINK_LIT=False; PRESERVE_LIT=False
-        TEMP_9A=0.20;  THINK_9A=False;  PRESERVE_9A=False
-        TEMP_9B=0.20;  THINK_9B=False;  PRESERVE_9B=False
-        TEMP_9C=0.30;  THINK_9C=False;  PRESERVE_9C=False
-        TEMP_9D=0.10;  THINK_9D=False;  PRESERVE_9D=False
-        PUBMED_SCOPE = {"disease": False, "organ": False, "organism": False, "other": False}
-        CT_SCOPE     = {"disease": False, "organ": False, "organism": False, "other": False}
-        LLM_SCOPE    = {"disease": False, "organ": False, "organism": False, "other": False}
-        run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True, disabled=True, key="run_btn_locked")
+        if billy_provider == "deNBI":
+            denbi_pw = st.text_input("deNBI passphrase", type="password",
+                                     placeholder="Enter deNBI passphrase", key="denbi_pw_billy")
+            if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
+                st.error("Incorrect deNBI passphrase.")
+            denbi_model_key = st.selectbox(
+                "Model", options=list(DENBI_MODELS.keys()),
+                format_func=lambda k: DENBI_MODELS[k], key="billy_denbi_model",
+            )
+            LLM_BASE_URL = DENBI_BASE_URL
+            LLM_MODEL    = denbi_model_key
+            API_KEY      = _DENBI_API_KEY
+            PROVIDER     = "denbi"
+
+        else:  # Groq
+            st.info(
+                "Free Groq account required — sign up at groq.com.\n\n"
+                "**Daily free limits:**\n"
+                "- llama-3.3-70b-versatile: ~100K tokens ≈ 5 full gene runs\n"
+                "- llama-3.1-8b-instant: ~500K tokens ≈ 30 gene queries"
+            )
+            groq_model_key = st.selectbox(
+                "Model", options=list(GROQ_MODELS.keys()),
+                format_func=lambda k: GROQ_MODELS[k], key="billy_groq_model",
+            )
+            API_KEY      = st.text_input("Groq API key", type="password",
+                                          placeholder="Paste your Groq API key", key="groq_key_billy")
+            LLM_BASE_URL = GROQ_BASE_URL
+            LLM_MODEL    = groq_model_key
+            PROVIDER     = "groq"
 
     else:
-        st.divider()
+        # ── Mountain Goat: full provider menu ────────────────────────────
+        mg_provider = st.selectbox(
+            "Provider",
+            options=["deNBI", "Anthropic", "OpenAI", "Groq", "Custom"],
+            key="mg_provider",
+        )
 
-        # ── LLM provider ──────────────────────────────────────────────────────
-        st.subheader("LLM Provider")
-
-        if is_billy:
-            # ── Billy: deNBI or Groq only ─────────────────────────────────────
-            billy_provider = st.selectbox(
-                "Provider",
-                options=["deNBI", "Groq"],
-                key="billy_provider",
+        if mg_provider == "deNBI":
+            denbi_pw = st.text_input("deNBI passphrase", type="password",
+                                     placeholder="Enter deNBI passphrase", key="denbi_pw_goat")
+            if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
+                st.error("Incorrect deNBI passphrase.")
+            denbi_model_opts = list(DENBI_MODELS.keys()) + ["Custom model"]
+            denbi_model_sel  = st.selectbox(
+                "Model", options=denbi_model_opts,
+                format_func=lambda k: DENBI_MODELS.get(k, k), key="goat_denbi_model",
             )
+            if denbi_model_sel == "Custom model":
+                LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. my-custom-model", key="goat_denbi_custom_model")
+            else:
+                LLM_MODEL = denbi_model_sel
+            LLM_BASE_URL = DENBI_BASE_URL
+            API_KEY      = _DENBI_API_KEY
+            PROVIDER     = "denbi"
 
-            if billy_provider == "deNBI":
-                denbi_pw = st.text_input("deNBI passphrase", type="password",
-                                         placeholder="Enter deNBI passphrase", key="denbi_pw_billy")
-                if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
-                    st.error("Incorrect deNBI passphrase.")
-                denbi_model_key = st.selectbox(
-                    "Model", options=list(DENBI_MODELS.keys()),
-                    format_func=lambda k: DENBI_MODELS[k], key="billy_denbi_model",
-                )
-                LLM_BASE_URL = DENBI_BASE_URL
-                LLM_MODEL    = denbi_model_key
-                API_KEY      = _DENBI_API_KEY  # loaded from .env, never exposed to tester
-                PROVIDER     = "denbi"
-
-            else:  # Groq
-                st.info(
-                    "Free Groq account required — sign up at groq.com.\n\n"
-                    "**Daily free limits:**\n"
-                    "- llama-3.3-70b-versatile: ~100K tokens ≈ 5 full gene runs\n"
-                    "- llama-3.1-8b-instant: ~500K tokens ≈ 30 gene queries"
-                )
-                groq_model_key = st.selectbox(
-                    "Model", options=list(GROQ_MODELS.keys()),
-                    format_func=lambda k: GROQ_MODELS[k], key="billy_groq_model",
-                )
-                API_KEY      = st.text_input("Groq API key", type="password",
-                                              placeholder="Paste your Groq API key", key="groq_key_billy")
-                LLM_BASE_URL = GROQ_BASE_URL
-                LLM_MODEL    = groq_model_key
-                PROVIDER     = "groq"
-
-        else:
-            # ── Mountain Goat: full provider menu ────────────────────────────
-            mg_provider = st.selectbox(
-                "Provider",
-                options=["deNBI", "Anthropic", "OpenAI", "Groq", "Custom"],
-                key="mg_provider",
+        elif mg_provider == "Anthropic":
+            anthropic_models = {
+                "claude-sonnet-4-6":        "Anthropic — claude-sonnet-4-6",
+                "claude-haiku-4-5-20251001": "Anthropic — claude-haiku-4-5-20251001",
+            }
+            anthropic_opts = list(anthropic_models.keys()) + ["Custom model"]
+            anthropic_sel  = st.selectbox(
+                "Model", options=anthropic_opts,
+                format_func=lambda k: anthropic_models.get(k, k), key="goat_anthropic_model",
             )
+            if anthropic_sel == "Custom model":
+                LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. claude-opus-4-6", key="goat_anthropic_custom")
+            else:
+                LLM_MODEL = anthropic_sel
+            API_KEY      = st.text_input("Anthropic API key", type="password",
+                                          placeholder="Paste your Anthropic API key", key="anthropic_key")
+            LLM_BASE_URL = "https://api.anthropic.com/v1"
+            PROVIDER     = "anthropic"
 
-            if mg_provider == "deNBI":
-                denbi_pw = st.text_input("deNBI passphrase", type="password",
-                                         placeholder="Enter deNBI passphrase", key="denbi_pw_goat")
-                if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
-                    st.error("Incorrect deNBI passphrase.")
-                denbi_model_opts = list(DENBI_MODELS.keys()) + ["Custom model"]
-                denbi_model_sel  = st.selectbox(
-                    "Model", options=denbi_model_opts,
-                    format_func=lambda k: DENBI_MODELS.get(k, k), key="goat_denbi_model",
-                )
-                if denbi_model_sel == "Custom model":
-                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. my-custom-model", key="goat_denbi_custom_model")
-                else:
-                    LLM_MODEL = denbi_model_sel
-                LLM_BASE_URL = DENBI_BASE_URL
-                API_KEY      = _DENBI_API_KEY  # loaded from .env, never exposed to tester
-                PROVIDER     = "denbi"
+        elif mg_provider == "OpenAI":
+            openai_models = {
+                "gpt-4o-mini":  "OpenAI — gpt-4o-mini",
+                "gpt-4.1-mini": "OpenAI — gpt-4.1-mini",
+            }
+            openai_opts = list(openai_models.keys()) + ["Custom model"]
+            openai_sel  = st.selectbox(
+                "Model", options=openai_opts,
+                format_func=lambda k: openai_models.get(k, k), key="goat_openai_model",
+            )
+            if openai_sel == "Custom model":
+                LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. gpt-4o", key="goat_openai_custom")
+            else:
+                LLM_MODEL = openai_sel
+            API_KEY      = st.text_input("OpenAI API key", type="password",
+                                          placeholder="Paste your OpenAI API key", key="openai_key")
+            LLM_BASE_URL = "https://api.openai.com/v1"
+            PROVIDER     = "openai"
 
-            elif mg_provider == "Anthropic":
-                anthropic_models = {
-                    "claude-sonnet-4-6":       "Anthropic — claude-sonnet-4-6",
-                    "claude-haiku-4-5-20251001": "Anthropic — claude-haiku-4-5-20251001",
-                }
-                anthropic_opts = list(anthropic_models.keys()) + ["Custom model"]
-                anthropic_sel  = st.selectbox(
-                    "Model", options=anthropic_opts,
-                    format_func=lambda k: anthropic_models.get(k, k), key="goat_anthropic_model",
-                )
-                if anthropic_sel == "Custom model":
-                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. claude-opus-4-6", key="goat_anthropic_custom")
-                else:
-                    LLM_MODEL = anthropic_sel
-                API_KEY      = st.text_input("Anthropic API key", type="password",
-                                              placeholder="Paste your Anthropic API key", key="anthropic_key")
-                LLM_BASE_URL = "https://api.anthropic.com/v1"
-                PROVIDER     = "anthropic"
+        elif mg_provider == "Groq":
+            st.info(
+                "Free Groq account required — sign up at groq.com.\n\n"
+                "**Daily free limits:**\n"
+                "- llama-3.3-70b-versatile: ~100K tokens ≈ 5 full gene runs\n"
+                "- llama-3.1-8b-instant: ~500K tokens ≈ 30 gene queries"
+            )
+            groq_opts = list(GROQ_MODELS.keys()) + ["Custom model"]
+            groq_sel  = st.selectbox(
+                "Model", options=groq_opts,
+                format_func=lambda k: GROQ_MODELS.get(k, k), key="goat_groq_model",
+            )
+            if groq_sel == "Custom model":
+                LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. mixtral-8x7b-32768", key="goat_groq_custom")
+            else:
+                LLM_MODEL = groq_sel
+            API_KEY      = st.text_input("Groq API key", type="password",
+                                          placeholder="Paste your Groq API key", key="groq_key_goat")
+            LLM_BASE_URL = GROQ_BASE_URL
+            PROVIDER     = "groq"
 
-            elif mg_provider == "OpenAI":
-                openai_models = {
-                    "gpt-4o-mini":  "OpenAI — gpt-4o-mini",
-                    "gpt-4.1-mini": "OpenAI — gpt-4.1-mini",
-                }
-                openai_opts = list(openai_models.keys()) + ["Custom model"]
-                openai_sel  = st.selectbox(
-                    "Model", options=openai_opts,
-                    format_func=lambda k: openai_models.get(k, k), key="goat_openai_model",
-                )
-                if openai_sel == "Custom model":
-                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. gpt-4o", key="goat_openai_custom")
-                else:
-                    LLM_MODEL = openai_sel
-                API_KEY      = st.text_input("OpenAI API key", type="password",
-                                              placeholder="Paste your OpenAI API key", key="openai_key")
-                LLM_BASE_URL = "https://api.openai.com/v1"
-                PROVIDER     = "openai"
+        else:  # Custom
+            st.caption("Enter your provider details below.")
+            LLM_BASE_URL = st.text_input("Base URL", placeholder="https://your-provider.com/v1", key="custom_base_url")
+            LLM_MODEL    = st.text_input("Model name", placeholder="e.g. mistral-7b-instruct", key="custom_model")
+            API_KEY      = st.text_input("API key", type="password",
+                                          placeholder="Paste your API key", key="custom_api_key")
+            PROVIDER     = "custom"
 
-            elif mg_provider == "Groq":
-                st.info(
-                    "Free Groq account required — sign up at groq.com.\n\n"
-                    "**Daily free limits:**\n"
-                    "- llama-3.3-70b-versatile: ~100K tokens ≈ 5 full gene runs\n"
-                    "- llama-3.1-8b-instant: ~500K tokens ≈ 30 gene queries"
-                )
-                groq_opts = list(GROQ_MODELS.keys()) + ["Custom model"]
-                groq_sel  = st.selectbox(
-                    "Model", options=groq_opts,
-                    format_func=lambda k: GROQ_MODELS.get(k, k), key="goat_groq_model",
-                )
-                if groq_sel == "Custom model":
-                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. mixtral-8x7b-32768", key="goat_groq_custom")
-                else:
-                    LLM_MODEL = groq_sel
-                API_KEY      = st.text_input("Groq API key", type="password",
-                                              placeholder="Paste your Groq API key", key="groq_key_goat")
-                LLM_BASE_URL = GROQ_BASE_URL
-                PROVIDER     = "groq"
-
-            else:  # Custom
-                st.caption("Enter your provider details below.")
-                LLM_BASE_URL = st.text_input("Base URL", placeholder="https://your-provider.com/v1", key="custom_base_url")
-                LLM_MODEL    = st.text_input("Model name", placeholder="e.g. mistral-7b-instruct", key="custom_model")
-                API_KEY      = st.text_input("API key", type="password",
-                                              placeholder="Paste your API key", key="custom_api_key")
-                PROVIDER     = "custom"
-
-        st.divider()
+    st.divider()
 
     # ── Core inputs ───────────────────────────────────────────────────────────
     st.subheader("Core Inputs")
@@ -464,8 +429,6 @@ with st.sidebar:
 
     st.divider()
     run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True, key="run_btn")
-
-        # ── end of _auth_ok else block ────────────────────────────────────────
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
