@@ -128,7 +128,7 @@ with st.sidebar:
         PUBMED_SCOPE = {"disease": False, "organ": False, "organism": False, "other": False}
         CT_SCOPE     = {"disease": False, "organ": False, "organism": False, "other": False}
         LLM_SCOPE    = {"disease": False, "organ": False, "organism": False, "other": False}
-        run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True, disabled=True)
+        run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True, disabled=True, key="run_btn_locked")
 
     else:
         st.divider()
@@ -463,7 +463,7 @@ with st.sidebar:
             st.error(f"Could not load session: {e}")
 
     st.divider()
-    run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True)
+    run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True, key="run_btn")
 
         # ── end of _auth_ok else block ────────────────────────────────────────
 
