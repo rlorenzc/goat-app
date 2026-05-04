@@ -1148,9 +1148,9 @@ if run_button:
         errors.append("Organism is required.")
     if not ANALYSIS_NAME.strip():
         errors.append("Analysis name is required.")
-    if selected_provider_key != "ollama" and not API_KEY:
+    if PROVIDER != "denbi" and not API_KEY:
         errors.append("API key is required for this provider.")
-    if selected_provider_key == "other" and (not LLM_BASE_URL or not LLM_MODEL):
+    if PROVIDER == "custom" and (not LLM_BASE_URL or not LLM_MODEL):
         errors.append("Custom provider requires Base URL and Model name.")
 
     if errors:
