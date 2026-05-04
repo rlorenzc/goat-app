@@ -5,13 +5,50 @@ Streamlit front-end for the gene research agent pipeline.
 
 import streamlit as st
 import time, re, html as html_lib, xml.etree.ElementTree as ET, os, collections, json
-from datetime import datetime
+from datetime import datetime, date
 from io import StringIO, BytesIO
 import requests
 import pandas as pd
 from openai import OpenAI
+from dotenv import load_dotenv
 
-# ── Session state initialisation ──────────────────────────────────────────────
+load_dotenv()
+
+# ── Profile credentials (loaded from .env, never exposed to browser) ───────────
+_BILLY_PASSWORD   = os.environ.get("BILLY_PASSWORD", "")
+_GOAT_PASSWORD    = os.environ.get("GOAT_PASSWORD", "")
+_DENBI_PASSPHRASE = os.environ.get("DENBI_PASSPHRASE", "")
+_DENBI_API_KEY    = os.environ.get("DENBI_API_KEY", "")
+
+# ── Usage log path ─────────────────────────────────────────────────────────────
+USAGE_LOG_PATH = os.path.join(os.path.dirname(__file__), "goat_usage.json")
+
+# ── Usage logging helpers ──────────────────────────────────────────────────────
+def _load_usage_log():
+    if os.path.exists(USAGE_LOG_PATH):
+        try:
+            with open(USAGE_LOG_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def _append_usage_log(profile, gene_count, modules_run, provider):
+    log = _load_usage_log()
+    log.append({
+        "date":       date.today().isoformat(),
+        "profile":    profile,
+        "gene_count": gene_count,
+        "modules":    modules_run,
+        "provider":   provider,
+    })
+    try:
+        with open(USAGE_LOG_PATH, "w") as f:
+            json.dump(log, f, indent=2)
+    except Exception:
+        pass
+
+# ── Session state initialisation ───────────────────────────────────────────────
 # All pipeline outputs live here so they survive Streamlit re-runs
 # (which happen on every widget interaction, including download button clicks).
 for _key in ("results", "go_bp_data", "reactome_data",
@@ -33,55 +70,205 @@ st.title("🐐 GOAT — investiGating biOlogical insights And hypoThesis")
 st.caption("Comprehensive literature mining + optional downstream enrichment")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — LLM provider + configuration
+# SIDEBAR — profile selector + configuration
 # ══════════════════════════════════════════════════════════════════════════════
+
+DENBI_BASE_URL = "https://denbi-llm-api-internal.bihealth.org/v1"
+DENBI_MODELS   = {
+    "qwen3.5-fp8":    "deNBI — qwen3.5-fp8",
+    "m25-reap-172b":  "deNBI — m25-reap-172b",
+    "gpt-oss-120b":   "deNBI — gpt-oss-120b",
+}
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_MODELS   = {
+    "llama-3.3-70b-versatile": "Groq — llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant":    "Groq — llama-3.1-8b-instant",
+}
+
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    # ── LLM provider ─────────────────────────────────────────────────────────
-    st.subheader("LLM Provider")
-
-    PROVIDER_REGISTRY = {
-        "groq":       {"base_url": "https://api.groq.com/openai/v1",          "model": "llama-3.3-70b-versatile",                "label": "Groq — Llama 3.3 70B (Free)"},
-        "openrouter": {"base_url": "https://openrouter.ai/api/v1",            "model": "meta-llama/llama-3.3-70b-instruct:free", "label": "OpenRouter — Llama 3.3 70B (Free)"},
-        "anthropic":  {"base_url": "https://api.anthropic.com/v1",            "model": "claude-sonnet-4-5",                      "label": "Anthropic — Claude Sonnet (Paid)"},
-        "openai":     {"base_url": "https://api.openai.com/v1",               "model": "gpt-4o-mini",                            "label": "OpenAI — GPT-4o mini (Paid)"},
-        "AKI":        {"base_url": "https://aki.io/v1",                       "model": "gpt-oss-120b",                           "label": "AKI — gpt-oss-120b (Paid)"},
-        "denbi-gpt":  {"base_url": "https://denbi-llm-api-internal.bihealth.org/v1",   "model": "gpt-oss-120b",                           "label": "deNBI — gpt-oss-120b"},
-        "denbi-qwen": {"base_url": "https://denbi-llm-api-internal.bihealth.org/v1",   "model": "qwen3.5-fp8",                            "label": "deNBI — qwen3.5-fp8"},
-        "denbi-m25":  {"base_url": "https://denbi-llm-api-internal.bihealth.org/v1",   "model": "m25-reap-172b",                          "label": "deNBI — m25-reap-172b"},
-        "ollama":     {"base_url": "http://localhost:11434/v1",                "model": "llama3",                                 "label": "Ollama — local (Free)"},
-        "other":      {"base_url": None,                                       "model": None,                                     "label": "Other (custom)"},
-    }
-
-    provider_labels = {k: v["label"] for k, v in PROVIDER_REGISTRY.items()}
-    selected_provider_key = st.selectbox(
-        "Provider",
-        options=list(PROVIDER_REGISTRY.keys()),
-        format_func=lambda k: provider_labels[k],
+    # ── Profile selector ──────────────────────────────────────────────────────
+    st.subheader("Profile")
+    selected_profile = st.selectbox(
+        "Select profile",
+        options=["Billy — Guided", "Mountain Goat — Explorer"],
+        key="profile_select",
     )
+    is_billy = selected_profile == "Billy — Guided"
+    is_goat  = selected_profile == "Mountain Goat — Explorer"
 
-    if selected_provider_key == "other":
-        custom_base_url = st.text_input("Base URL", placeholder="https://your-provider.com/v1")
-        custom_model    = st.text_input("Model name", placeholder="e.g. mistral-7b-instruct")
-        LLM_BASE_URL    = custom_base_url
-        LLM_MODEL       = custom_model
-    elif selected_provider_key == "ollama":
-        LLM_BASE_URL = PROVIDER_REGISTRY["ollama"]["base_url"]
-        LLM_MODEL    = PROVIDER_REGISTRY["ollama"]["model"]
+    pw_input = st.text_input("Password", type="password", placeholder="Enter profile password", key="profile_pw")
+
+    expected_pw = _BILLY_PASSWORD if is_billy else _GOAT_PASSWORD
+    _auth_ok    = (pw_input == expected_pw) if expected_pw else False
+
+    if pw_input and not _auth_ok:
+        st.error("Incorrect password.")
+    if not pw_input:
+        st.caption("Enter the profile password to unlock the configuration.")
+
+    if not _auth_ok:
+        # Render placeholder disabled widgets so layout doesn't jump on unlock
+        st.divider()
+        st.info("Configuration locked. Enter the correct password above.")
+        # Provide safe defaults so downstream code doesn't NameError
+        LLM_BASE_URL = ""; LLM_MODEL = ""; API_KEY = ""; PROVIDER = ""
+        genes_raw = ""; UNIPROT_ORGANISM = "Homo sapiens"; ANALYSIS_NAME = ""
+        DISEASE_CONTEXT = ""; ORGAN_CONTEXT = ""; OTHER_CONTEXT = ""; NOTES = ""
+        MAX_ABSTRACTS_PER_GENE = 5; YEAR_FROM = 2020; FALLBACK_STEPS = [2015,2010,2005,2000]
+        ENABLE_GO_PATHWAYS = True; ENABLE_DRUG_TARGETS = True
+        ENABLE_DISEASE_ASSOCIATION = True; ENABLE_CLINICAL_TRIALS = True; ENABLE_GWAS = True
+        RUN_9A = True; RUN_9B = True; RUN_9C = True; RUN_9D = True
+        TEMP_LIT=0.10; THINK_LIT=False; PRESERVE_LIT=False
+        TEMP_9A=0.20;  THINK_9A=False;  PRESERVE_9A=False
+        TEMP_9B=0.20;  THINK_9B=False;  PRESERVE_9B=False
+        TEMP_9C=0.30;  THINK_9C=False;  PRESERVE_9C=False
+        TEMP_9D=0.10;  THINK_9D=False;  PRESERVE_9D=False
+        PUBMED_SCOPE = {"disease": False, "organ": False, "organism": False, "other": False}
+        CT_SCOPE     = {"disease": False, "organ": False, "organism": False, "other": False}
+        LLM_SCOPE    = {"disease": False, "organ": False, "organism": False, "other": False}
+        run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True, disabled=True)
+
     else:
-        LLM_BASE_URL = PROVIDER_REGISTRY[selected_provider_key]["base_url"]
-        LLM_MODEL    = PROVIDER_REGISTRY[selected_provider_key]["model"]
+        st.divider()
 
-    if selected_provider_key == "ollama":
-        API_KEY = "ollama"
-        st.info("Ollama selected — no API key required.")
-    else:
-        API_KEY = st.text_input("API Key", type="password", placeholder="Paste your API key here")
+        # ── LLM provider ──────────────────────────────────────────────────────
+        st.subheader("LLM Provider")
 
-    PROVIDER = selected_provider_key
+        if is_billy:
+            # ── Billy: deNBI or Groq only ─────────────────────────────────────
+            billy_provider = st.selectbox(
+                "Provider",
+                options=["deNBI", "Groq"],
+                key="billy_provider",
+            )
 
-    st.divider()
+            if billy_provider == "deNBI":
+                denbi_pw = st.text_input("deNBI passphrase", type="password",
+                                         placeholder="Enter deNBI passphrase", key="denbi_pw_billy")
+                if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
+                    st.error("Incorrect deNBI passphrase.")
+                denbi_model_key = st.selectbox(
+                    "Model", options=list(DENBI_MODELS.keys()),
+                    format_func=lambda k: DENBI_MODELS[k], key="billy_denbi_model",
+                )
+                LLM_BASE_URL = DENBI_BASE_URL
+                LLM_MODEL    = denbi_model_key
+                API_KEY      = _DENBI_API_KEY  # loaded from .env, never exposed to tester
+                PROVIDER     = "denbi"
+
+            else:  # Groq
+                st.info(
+                    "Free Groq account required — sign up at groq.com.\n\n"
+                    "**Daily free limits:**\n"
+                    "- llama-3.3-70b-versatile: ~100K tokens ≈ 5 full gene runs\n"
+                    "- llama-3.1-8b-instant: ~500K tokens ≈ 30 gene queries"
+                )
+                groq_model_key = st.selectbox(
+                    "Model", options=list(GROQ_MODELS.keys()),
+                    format_func=lambda k: GROQ_MODELS[k], key="billy_groq_model",
+                )
+                API_KEY      = st.text_input("Groq API key", type="password",
+                                              placeholder="Paste your Groq API key", key="groq_key_billy")
+                LLM_BASE_URL = GROQ_BASE_URL
+                LLM_MODEL    = groq_model_key
+                PROVIDER     = "groq"
+
+        else:
+            # ── Mountain Goat: full provider menu ────────────────────────────
+            mg_provider = st.selectbox(
+                "Provider",
+                options=["deNBI", "Anthropic", "OpenAI", "Groq", "Custom"],
+                key="mg_provider",
+            )
+
+            if mg_provider == "deNBI":
+                denbi_pw = st.text_input("deNBI passphrase", type="password",
+                                         placeholder="Enter deNBI passphrase", key="denbi_pw_goat")
+                if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
+                    st.error("Incorrect deNBI passphrase.")
+                denbi_model_opts = list(DENBI_MODELS.keys()) + ["Custom model"]
+                denbi_model_sel  = st.selectbox(
+                    "Model", options=denbi_model_opts,
+                    format_func=lambda k: DENBI_MODELS.get(k, k), key="goat_denbi_model",
+                )
+                if denbi_model_sel == "Custom model":
+                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. my-custom-model", key="goat_denbi_custom_model")
+                else:
+                    LLM_MODEL = denbi_model_sel
+                LLM_BASE_URL = DENBI_BASE_URL
+                API_KEY      = _DENBI_API_KEY  # loaded from .env, never exposed to tester
+                PROVIDER     = "denbi"
+
+            elif mg_provider == "Anthropic":
+                anthropic_models = {
+                    "claude-sonnet-4-6":       "Anthropic — claude-sonnet-4-6",
+                    "claude-haiku-4-5-20251001": "Anthropic — claude-haiku-4-5-20251001",
+                }
+                anthropic_opts = list(anthropic_models.keys()) + ["Custom model"]
+                anthropic_sel  = st.selectbox(
+                    "Model", options=anthropic_opts,
+                    format_func=lambda k: anthropic_models.get(k, k), key="goat_anthropic_model",
+                )
+                if anthropic_sel == "Custom model":
+                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. claude-opus-4-6", key="goat_anthropic_custom")
+                else:
+                    LLM_MODEL = anthropic_sel
+                API_KEY      = st.text_input("Anthropic API key", type="password",
+                                              placeholder="Paste your Anthropic API key", key="anthropic_key")
+                LLM_BASE_URL = "https://api.anthropic.com/v1"
+                PROVIDER     = "anthropic"
+
+            elif mg_provider == "OpenAI":
+                openai_models = {
+                    "gpt-4o-mini":  "OpenAI — gpt-4o-mini",
+                    "gpt-4.1-mini": "OpenAI — gpt-4.1-mini",
+                }
+                openai_opts = list(openai_models.keys()) + ["Custom model"]
+                openai_sel  = st.selectbox(
+                    "Model", options=openai_opts,
+                    format_func=lambda k: openai_models.get(k, k), key="goat_openai_model",
+                )
+                if openai_sel == "Custom model":
+                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. gpt-4o", key="goat_openai_custom")
+                else:
+                    LLM_MODEL = openai_sel
+                API_KEY      = st.text_input("OpenAI API key", type="password",
+                                              placeholder="Paste your OpenAI API key", key="openai_key")
+                LLM_BASE_URL = "https://api.openai.com/v1"
+                PROVIDER     = "openai"
+
+            elif mg_provider == "Groq":
+                st.info(
+                    "Free Groq account required — sign up at groq.com.\n\n"
+                    "**Daily free limits:**\n"
+                    "- llama-3.3-70b-versatile: ~100K tokens ≈ 5 full gene runs\n"
+                    "- llama-3.1-8b-instant: ~500K tokens ≈ 30 gene queries"
+                )
+                groq_opts = list(GROQ_MODELS.keys()) + ["Custom model"]
+                groq_sel  = st.selectbox(
+                    "Model", options=groq_opts,
+                    format_func=lambda k: GROQ_MODELS.get(k, k), key="goat_groq_model",
+                )
+                if groq_sel == "Custom model":
+                    LLM_MODEL = st.text_input("Custom model name", placeholder="e.g. mixtral-8x7b-32768", key="goat_groq_custom")
+                else:
+                    LLM_MODEL = groq_sel
+                API_KEY      = st.text_input("Groq API key", type="password",
+                                              placeholder="Paste your Groq API key", key="groq_key_goat")
+                LLM_BASE_URL = GROQ_BASE_URL
+                PROVIDER     = "groq"
+
+            else:  # Custom
+                st.caption("Enter your provider details below.")
+                LLM_BASE_URL = st.text_input("Base URL", placeholder="https://your-provider.com/v1", key="custom_base_url")
+                LLM_MODEL    = st.text_input("Model name", placeholder="e.g. mistral-7b-instruct", key="custom_model")
+                API_KEY      = st.text_input("API key", type="password",
+                                              placeholder="Paste your API key", key="custom_api_key")
+                PROVIDER     = "custom"
+
+        st.divider()
 
     # ── Core inputs ───────────────────────────────────────────────────────────
     st.subheader("Core Inputs")
@@ -156,32 +343,41 @@ with st.sidebar:
     if not _therapeutic_modules_enabled:
         st.caption("⚠️ Therapeutic Landscape requires at least one of: Drug Targets, Disease Associations, Clinical Trials, or GWAS Catalog.")
 
-    st.caption("Configure temperature, thinking, and preserve thinking per module.")
+    # ── LLM advanced config: hidden for Billy, collapsible for Mountain Goat ──
+    if is_billy:
+        # Fixed safe defaults — not exposed to Billy
+        TEMP_LIT=0.10; THINK_LIT=False; PRESERVE_LIT=False
+        TEMP_9A=0.20;  THINK_9A=False;  PRESERVE_9A=False
+        TEMP_9B=0.20;  THINK_9B=False;  PRESERVE_9B=False
+        TEMP_9C=0.30;  THINK_9C=False;  PRESERVE_9C=False
+        TEMP_9D=0.10;  THINK_9D=False;  PRESERVE_9D=False
+    else:
+        with st.expander("Advanced LLM settings", expanded=False):
+            st.caption("Configure temperature, thinking, and preserve thinking per module.")
 
-    # Column headers
-    _lm_hdr = st.columns([2.2, 1.2, 1, 1])
-    for _ci, _lbl in enumerate(["Module", "Temperature", "Thinking", "Preserve"]):
-        _lm_hdr[_ci].markdown(
-            f"<span style='font-size:0.78em; color:gray; text-transform:uppercase; "
-            f"letter-spacing:0.05em;'>{_lbl}</span>", unsafe_allow_html=True)
+            def _module_row(label, key, default_temp, enabled=True):
+                _cols = st.columns([2.2, 1.2, 1, 1])
+                _cols[0].markdown(f"<span style='font-size:0.9em;'>{label}</span>", unsafe_allow_html=True)
+                _temp    = _cols[1].number_input(" ", min_value=0.0, max_value=2.0, value=default_temp,
+                                                 step=0.05, format="%.2f", key=f"{key}_temp",
+                                                 disabled=not enabled, label_visibility="collapsed")
+                _think   = _cols[2].checkbox(" ", value=False, key=f"{key}_think",
+                                             disabled=not enabled, label_visibility="collapsed")
+                _preserve = _cols[3].checkbox(" ", value=False, key=f"{key}_preserve",
+                                              disabled=not (enabled and _think), label_visibility="collapsed")
+                return _temp, _think, _preserve
 
-    def _module_row(label, key, default_temp, enabled=True):
-        _cols = st.columns([2.2, 1.2, 1, 1])
-        _cols[0].markdown(f"<span style='font-size:0.9em;'>{label}</span>", unsafe_allow_html=True)
-        _temp    = _cols[1].number_input(" ", min_value=0.0, max_value=2.0, value=default_temp,
-                                         step=0.05, format="%.2f", key=f"{key}_temp",
-                                         disabled=not enabled, label_visibility="collapsed")
-        _think   = _cols[2].checkbox(" ", value=False, key=f"{key}_think",
-                                     disabled=not enabled, label_visibility="collapsed")
-        _preserve = _cols[3].checkbox(" ", value=False, key=f"{key}_preserve",
-                                      disabled=not (enabled and _think), label_visibility="collapsed")
-        return _temp, _think, _preserve
+            _lm_hdr = st.columns([2.2, 1.2, 1, 1])
+            for _ci, _lbl in enumerate(["Module", "Temp", "Think", "Preserve"]):
+                _lm_hdr[_ci].markdown(
+                    f"<span style='font-size:0.78em; color:gray; text-transform:uppercase; "
+                    f"letter-spacing:0.05em;'>{_lbl}</span>", unsafe_allow_html=True)
 
-    TEMP_LIT,  THINK_LIT,  PRESERVE_LIT  = _module_row("Lit. Abstract Summary", "lit",  0.10)
-    TEMP_9A,   THINK_9A,   PRESERVE_9A   = _module_row("Lit. Synthesis (9A)",    "9a",   0.20, enabled=RUN_9A)
-    TEMP_9B,   THINK_9B,   PRESERVE_9B   = _module_row("Therapeutic (9B)",       "9b",   0.20, enabled=RUN_9B)
-    TEMP_9C,   THINK_9C,   PRESERVE_9C   = _module_row("Experimental (9C)",      "9c",   0.30, enabled=RUN_9C)
-    TEMP_9D,   THINK_9D,   PRESERVE_9D   = _module_row("Target Prio. (9D)",      "9d",   0.10, enabled=RUN_9D)
+            TEMP_LIT,  THINK_LIT,  PRESERVE_LIT  = _module_row("Lit. Abstract Summary", "lit",  0.10)
+            TEMP_9A,   THINK_9A,   PRESERVE_9A   = _module_row("Lit. Synthesis (9A)",    "9a",   0.20, enabled=RUN_9A)
+            TEMP_9B,   THINK_9B,   PRESERVE_9B   = _module_row("Therapeutic (9B)",       "9b",   0.20, enabled=RUN_9B)
+            TEMP_9C,   THINK_9C,   PRESERVE_9C   = _module_row("Experimental (9C)",      "9c",   0.30, enabled=RUN_9C)
+            TEMP_9D,   THINK_9D,   PRESERVE_9D   = _module_row("Target Prio. (9D)",      "9d",   0.10, enabled=RUN_9D)
 
     st.divider()
 
@@ -268,6 +464,8 @@ with st.sidebar:
 
     st.divider()
     run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True)
+
+        # ── end of _auth_ok else block ────────────────────────────────────────
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -1118,6 +1316,26 @@ if run_button:
         "core": {"tokens": total_tokens, "runtime": core_elapsed},
     }
 
+    # ── Log usage (GDPR-safe: date, profile, gene count, modules, provider) ───
+    _modules_run = [m for m, enabled in [
+        ("GO/Reactome",    ENABLE_GO_PATHWAYS),
+        ("Drug Targets",   ENABLE_DRUG_TARGETS),
+        ("Disease Assoc.", ENABLE_DISEASE_ASSOCIATION),
+        ("Clin. Trials",   ENABLE_CLINICAL_TRIALS),
+        ("GWAS",           ENABLE_GWAS),
+        ("LLM-9A",         RUN_9A),
+        ("LLM-9B",         RUN_9B),
+        ("LLM-9C",         RUN_9C),
+        ("LLM-9D",         RUN_9D),
+    ] if enabled]
+    _gene_count = sum(1 for r in results if r.get("status") == "OK")
+    _append_usage_log(
+        profile    = selected_profile,
+        gene_count = _gene_count,
+        modules_run= ", ".join(_modules_run),
+        provider   = PROVIDER,
+    )
+
     # ══════════════════════════════════════════════════════════════════════════
     # DISPLAY RESULTS
     # ══════════════════════════════════════════════════════════════════════════
@@ -1128,7 +1346,7 @@ if st.session_state.pipeline_done:
     go_bp_data    = st.session_state.go_bp_data
     reactome_data = st.session_state.reactome_data
     tabs = st.tabs(["📋 Core Results", "🧬 GO & Reactome", "💊 Drugs & Diseases",
-                    "🏥 Clinical Trials", "🧪 GWAS", "🤖 LLM Synthesis", "⬇️ Export"])
+                    "🏥 Clinical Trials", "🧪 GWAS", "🤖 LLM Synthesis", "⬇️ Export", "ℹ️ About"])
 
     # ── Tab 1: Core results ───────────────────────────────────────────────────
     with tabs[0]:
@@ -1911,6 +2129,55 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
             )
 
         st.info("💡 The HTML report can be opened directly in any browser and shared with colleagues who don't have Python installed.")
+
+    # ── Tab 8: About ──────────────────────────────────────────────────────────
+    with tabs[7]:
+        # ── Usage graph ───────────────────────────────────────────────────────
+        _usage_data = _load_usage_log()
+        if _usage_data:
+            import plotly.express as px
+            _udf = pd.DataFrame(_usage_data)
+            _udf["date"] = pd.to_datetime(_udf["date"])
+            _udf = _udf.sort_values("date")
+            _udf["cumulative_runs"] = range(1, len(_udf) + 1)
+            _fig = px.line(
+                _udf, x="date", y="cumulative_runs",
+                labels={"date": "Date", "cumulative_runs": "Cumulative runs"},
+                title="GOAT usage over time",
+                markers=True,
+            )
+            _fig.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                yaxis=dict(tickformat="d", rangemode="tozero"),
+            )
+            st.plotly_chart(_fig, use_container_width=True)
+        else:
+            st.info("No usage data yet — run the pipeline to start tracking.")
+
+        st.caption(
+            "Only date, profile, gene count, modules selected, and provider are recorded. "
+            "No personal data or gene identifiers are stored. "
+            "This tool is operated within the EU and data is handled in accordance with GDPR."
+        )
+
+        st.divider()
+
+        # ── Developer credits ──────────────────────────────────────────────────
+        st.subheader("About GOAT")
+        st.markdown("""
+**Developed by**
+
+Dr. Robert Lorenz Chua, Foo Wei Ten, and Leonard Tiling
+
+*Intelligent Imaging, Center for Digital Health, Berlin Institute of Health at Charité*
+
+---
+
+For more information, please visit:
+- [Intelligent Imaging](https://iimaging.org)
+- [Center for Digital Health — Eils Lab, BIH](https://www.bihealth.org/en/research/research-group/eils-lab-bih-digital-health-center)
+        """)
 
 else:
     # Landing state — shown before run
