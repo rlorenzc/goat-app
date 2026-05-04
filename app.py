@@ -21,6 +21,10 @@ _DENBI_API_KEY    = os.environ.get("DENBI_API_KEY", "")
 # ── Usage log path ─────────────────────────────────────────────────────────────
 USAGE_LOG_PATH = os.path.join(os.path.dirname(__file__), "goat_usage.json")
 
+# ── Module-level log fallback (overridden inside if run_button: block) ─────────
+def log(msg):
+    pass
+
 # ── Usage logging helpers ──────────────────────────────────────────────────────
 def _load_usage_log():
     if os.path.exists(USAGE_LOG_PATH):
@@ -428,7 +432,7 @@ with st.sidebar:
             st.error(f"Could not load session: {e}")
 
     st.divider()
-    run_button = st.button("▶ Run GOAT", type="primary", use_container_width=True, key="run_btn")
+    run_button = st.button("▶ Run GOAT", type="primary", width="stretch", key="run_btn")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -1320,7 +1324,7 @@ if st.session_state.pipeline_done:
             display_cols = [c for c in ["gene","official_full_name","uniprot_id",
                                          "ensembl_gene_id","articles_found","status"]
                             if c in ok.columns]
-            st.dataframe(ok[display_cols], use_container_width=True)
+            st.dataframe(ok[display_cols], width="stretch")
             for _, r in ok.iterrows():
                 with st.expander(f"📄 {r['gene']} — {r.get('official_full_name','N/A')}"):
                     st.markdown(f"**RefSeq summary:** {r.get('refseq_summary','N/A')}")
@@ -1367,16 +1371,16 @@ if st.session_state.pipeline_done:
                 fig = build_sankey_fig(df_go, "go_term",
                     f"GO Biological Process{' — '+context_suffix if context_suffix else ''}",
                     gene_color="#4E79A7", term_color="#F28E2B")
-                if fig: st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(df_go, use_container_width=True)
+                if fig: st.plotly_chart(fig, width="stretch")
+                st.dataframe(df_go, width="stretch")
 
             if not df_reactome.empty:
                 st.markdown("### Reactome Pathways")
                 fig = build_sankey_fig(df_reactome, "pathway_name",
                     f"Reactome Pathways{' — '+context_suffix if context_suffix else ''}",
                     gene_color="#4E79A7", term_color="#59A14F")
-                if fig: st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(df_reactome, use_container_width=True)
+                if fig: st.plotly_chart(fig, width="stretch")
+                st.dataframe(df_reactome, width="stretch")
 
     # ── Tab 3: Drugs & Diseases ───────────────────────────────────────────────
     with tabs[2]:
@@ -1434,11 +1438,11 @@ if st.session_state.pipeline_done:
 
             if ot_rows:
                 st.markdown("#### Disease associations (OpenTargets)")
-                st.dataframe(pd.DataFrame(ot_rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(ot_rows), width="stretch")
 
             if drug_rows:
                 st.markdown("#### Known drugs (ChEMBL)")
-                st.dataframe(pd.DataFrame(drug_rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(drug_rows), width="stretch")
             elif ENABLE_DRUG_TARGETS:
                 st.info("No drug data found via ChEMBL.")
 
@@ -1466,7 +1470,7 @@ if st.session_state.pipeline_done:
             ct_prog.progress(1.0, text="Done ✓")
             if ct_rows:
                 df_ct = pd.DataFrame(ct_rows)
-                st.dataframe(df_ct, use_container_width=True)
+                st.dataframe(df_ct, width="stretch")
             else:
                 st.info("No active trials found.")
 
@@ -1491,7 +1495,7 @@ if st.session_state.pipeline_done:
             gwas_prog.progress(1.0, text="Done ✓")
             if gwas_rows:
                 df_gwas = pd.DataFrame(gwas_rows)
-                st.dataframe(df_gwas, use_container_width=True)
+                st.dataframe(df_gwas, width="stretch")
             else:
                 st.info("No GWAS associations found.")
 
@@ -1870,7 +1874,7 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                             "Runtime":     f"**{fmt_runtime(total_llm_rt)}**",
                         })
                     st.markdown("#### Run Summary")
-                    st.dataframe(pd.DataFrame(_metric_rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(_metric_rows), width="stretch", hide_index=True)
                     st.markdown("---")
 
                 # ── Display (runs every render, cached or freshly generated) ──
@@ -2114,7 +2118,7 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                 paper_bgcolor="rgba(0,0,0,0)",
                 yaxis=dict(tickformat="d", rangemode="tozero"),
             )
-            st.plotly_chart(_fig, use_container_width=True)
+            st.plotly_chart(_fig, width="stretch")
         else:
             st.info("No usage data yet — run the pipeline to start tracking.")
 
