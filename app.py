@@ -18,10 +18,7 @@ try:
 except ImportError:
     _WORDCLOUD_AVAILABLE = False
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-
-import sys
-print(f"DENBI_PASSPHRASE loaded: {'yes' if os.environ.get('DENBI_PASSPHRASE') else 'NO - empty'}", file=sys.stderr)
+load_dotenv()
 
 # ── NCBI constants — defined early so pre-flight check can reference them ──────
 NCBI_BASE  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -139,7 +136,7 @@ with st.sidebar:
         if billy_provider == "deNBI":
             denbi_pw = st.text_input("deNBI passphrase", type="password",
                                      placeholder="Enter deNBI passphrase", key="denbi_pw_billy")
-            if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
+            if denbi_pw and len(denbi_pw) >= len(_DENBI_PASSPHRASE) and denbi_pw != _DENBI_PASSPHRASE:
                 st.error("Incorrect deNBI passphrase.")
             denbi_model_key = st.selectbox(
                 "Model", options=list(DENBI_MODELS.keys()),
@@ -190,7 +187,7 @@ with st.sidebar:
         if mg_provider == "deNBI":
             denbi_pw = st.text_input("deNBI passphrase", type="password",
                                      placeholder="Enter deNBI passphrase", key="denbi_pw_goat")
-            if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
+            if denbi_pw and len(denbi_pw) >= len(_DENBI_PASSPHRASE) and denbi_pw != _DENBI_PASSPHRASE:
                 st.error("Incorrect deNBI passphrase.")
             denbi_model_opts = list(DENBI_MODELS.keys()) + ["Custom model"]
             denbi_model_sel  = st.selectbox(
@@ -344,7 +341,7 @@ with st.sidebar:
                 }
                 genes_raw = ", ".join(RANKED_GENE_SCORES.keys())
                 st.success(f"Loaded {len(RANKED_GENE_SCORES)} genes from ranked list.")
-                st.dataframe(_rdf.head(10), use_container_width=True)
+                st.dataframe(_rdf.head(10), width="stretch")
                 st.session_state.ranked_gene_scores = RANKED_GENE_SCORES
                 st.session_state.ranked_score_label = RANKED_SCORE_LABEL
             except Exception as _e:
@@ -591,12 +588,12 @@ with st.sidebar:
 
             # ── LLM check — advisory only, does not gate Run ──────────────────
             _pf_prog.progress(len(_apis) / _total, text="Checking LLM provider...")
-            _llm_api_key = API_KEY if profile_set else ""
-            if _llm_api_key or PROVIDER == "denbi":
+            _llm_api_key = _DENBI_API_KEY if PROVIDER == "denbi" else (API_KEY if profile_set else "")
+            if _llm_api_key:
                 try:
                     _t0 = time.time()
                     _tmp_llm = OpenAI(
-                        api_key=_llm_api_key if _llm_api_key else "ollama",
+                        api_key=_llm_api_key,
                         base_url=LLM_BASE_URL)
                     _tmp_llm.chat.completions.create(
                         model=LLM_MODEL,
@@ -1636,12 +1633,12 @@ if st.session_state.pipeline_done:
                     _col_s, _col_w = st.columns([1, 1])
                     with _col_s:
                         if _go_sankey:
-                            st.plotly_chart(_go_sankey, use_container_width=True)
+                            st.plotly_chart(_go_sankey, width="stretch")
                         else:
                             st.info("Sankey unavailable.")
                     with _col_w:
                         if _go_wc:
-                            st.pyplot(_go_wc, use_container_width=True)
+                            st.pyplot(_go_wc, width="stretch")
                         elif not _WORDCLOUD_AVAILABLE:
                             st.info("Install `wordcloud` library for word clouds.")
                         else:
@@ -1659,12 +1656,12 @@ if st.session_state.pipeline_done:
                     _col_s, _col_w = st.columns([1, 1])
                     with _col_s:
                         if _react_sankey:
-                            st.plotly_chart(_react_sankey, use_container_width=True)
+                            st.plotly_chart(_react_sankey, width="stretch")
                         else:
                             st.info("Sankey unavailable.")
                     with _col_w:
                         if _react_wc:
-                            st.pyplot(_react_wc, use_container_width=True)
+                            st.pyplot(_react_wc, width="stretch")
                         elif not _WORDCLOUD_AVAILABLE:
                             st.info("Install `wordcloud` library for word clouds.")
                         else:
@@ -2414,7 +2411,7 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                     paper_bgcolor="rgba(0,0,0,0)",
                     yaxis=dict(tickformat="d", rangemode="tozero"),
                 )
-                st.plotly_chart(_fig_runs, use_container_width=True)
+                st.plotly_chart(_fig_runs, width="stretch")
 
             with _col_g:
                 _fig_genes = px.line(
@@ -2429,7 +2426,7 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                     paper_bgcolor="rgba(0,0,0,0)",
                     yaxis=dict(tickformat="d", rangemode="tozero"),
                 )
-                st.plotly_chart(_fig_genes, use_container_width=True)
+                st.plotly_chart(_fig_genes, width="stretch")
         else:
             st.info("No usage data yet — run the pipeline to start tracking.")
 
