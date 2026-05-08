@@ -1387,9 +1387,13 @@ def build_wordcloud_fig(df, label_col, title):
 # ══════════════════════════════════════════════════════════════════════════════
 # LLM CLIENT — created from sidebar values on every page load, always available
 # ══════════════════════════════════════════════════════════════════════════════
+# For deNBI, always use the env-loaded key directly so the client is correctly
+# instantiated regardless of passphrase validation state.
 # This must live outside `if run_button:` so that the LLM synthesis tab
 # can call it after a re-run triggered by a download button click.
-llm = OpenAI(api_key=API_KEY if API_KEY else "ollama", base_url=LLM_BASE_URL)
+_llm_key = _DENBI_API_KEY if PROVIDER == "denbi" else (API_KEY if API_KEY else "ollama")
+_llm_url = LLM_BASE_URL if LLM_BASE_URL else "https://api.openai.com/v1"
+llm = OpenAI(api_key=_llm_key, base_url=_llm_url)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
