@@ -18,7 +18,10 @@ try:
 except ImportError:
     _WORDCLOUD_AVAILABLE = False
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+import sys
+print(f"DENBI_PASSPHRASE loaded: {'yes' if os.environ.get('DENBI_PASSPHRASE') else 'NO - empty'}", file=sys.stderr)
 
 # ── NCBI constants — defined early so pre-flight check can reference them ──────
 NCBI_BASE  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
