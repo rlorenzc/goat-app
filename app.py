@@ -1395,6 +1395,8 @@ _llm_key = _DENBI_API_KEY if PROVIDER == "denbi" else (API_KEY if API_KEY else "
 _llm_url = LLM_BASE_URL if LLM_BASE_URL else "https://api.openai.com/v1"
 llm = OpenAI(api_key=_llm_key, base_url=_llm_url)
 
+import sys
+print(f"DEBUG llm client: provider={PROVIDER}, key_set={'yes' if _llm_key else 'NO'}, url={_llm_url}", file=sys.stderr)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN — run pipeline when button is clicked
