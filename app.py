@@ -325,7 +325,7 @@ with st.sidebar:
             "Get a free key at [ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/)."
         )
 
-st.divider()
+    st.divider()
 
     # ── API Status ────────────────────────────────────────────────────────────
     st.subheader("🔌 API Status")
@@ -385,7 +385,7 @@ st.divider()
 
     # ── Core inputs ───────────────────────────────────────────────────────────
     st.subheader("Core Inputs")
-    
+
     # ── Gene input toggle ─────────────────────────────────────────────────────
     gene_input_mode = st.radio(
         "Gene input method",
