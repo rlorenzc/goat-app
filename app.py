@@ -11,6 +11,12 @@ import requests
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
+try:
+    from wordcloud import WordCloud
+    import matplotlib.pyplot as plt
+    _WORDCLOUD_AVAILABLE = True
+except ImportError:
+    _WORDCLOUD_AVAILABLE = False
 
 load_dotenv()
 
@@ -51,14 +57,18 @@ def _append_usage_log(profile, gene_count, modules_run, provider):
         pass
 
 # ── Session state initialisation ───────────────────────────────────────────────
-# All pipeline outputs live here so they survive Streamlit re-runs
-# (which happen on every widget interaction, including download button clicks).
 for _key in ("results", "go_bp_data", "reactome_data",
-             "synthesis_results", "synthesis_tables", "pipeline_done", "run_metrics"):
+             "synthesis_results", "synthesis_tables", "pipeline_done", "run_metrics",
+             "ranked_gene_scores", "ranked_score_label", "api_check_results", "llm_check_result",
+             "llm_base_url", "llm_api_key", "llm_model"):
     if _key not in st.session_state:
         st.session_state[_key] = [] if _key in ("results","go_bp_data","reactome_data") \
-                                  else ({} if _key in ("synthesis_results","synthesis_tables","run_metrics") \
-                                  else False)
+                                  else ({} if _key in ("synthesis_results","synthesis_tables",
+                                                       "run_metrics","ranked_gene_scores",
+                                                       "api_check_results") \
+                                  else (False if _key == "pipeline_done" \
+                                  else (None if _key == "llm_check_result" \
+                                  else "")))
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -94,19 +104,85 @@ with st.sidebar:
     st.subheader("Profile")
     selected_profile = st.selectbox(
         "Select profile",
-        options=["Billy — Guided", "Mountain Goat — Explorer"],
+        options=["— Select a profile —", "Billy — Guided", "Mountain Goat — Explorer"],
         key="profile_select",
     )
-    is_billy = selected_profile == "Billy — Guided"
-    is_goat  = selected_profile == "Mountain Goat — Explorer"
+    is_billy    = selected_profile == "Billy — Guided"
+    is_goat     = selected_profile == "Mountain Goat — Explorer"
+    profile_set = is_billy or is_goat
+
+    if not profile_set:
+        st.info("Please select a profile to begin.")
+
+    st.divider()
+
+    # ── API Status ────────────────────────────────────────────────────────────
+    st.subheader("🔌 API Status")
+    st.caption("Check connectivity to all databases before running. Results are advisory — the Run button is never blocked by this check.")
+
+    # Critical APIs (pipeline fails without them); optional APIs (modules can be skipped)
+    _CRITICAL_APIS = {"NCBI Gene", "PubMed", "UniProt"}
+
+    if st.button("Run connectivity check", key="preflight_btn", disabled=not profile_set):
+        _pf_results = {}
+        _pf_prog    = st.progress(0, text="Checking APIs...")
+
+        _api_checks = [
+            ("NCBI Gene",      lambda: requests.get(f"{NCBI_BASE}/esearch.fcgi",
+                                   params={"db":"gene","term":"TP53","retmax":1,"retmode":"json",
+                                           "email":NCBI_EMAIL}, timeout=8).raise_for_status()),
+            ("PubMed",         lambda: requests.get(f"{NCBI_BASE}/esearch.fcgi",
+                                   params={"db":"pubmed","term":"fibrosis","retmax":1,"retmode":"json",
+                                           "email":NCBI_EMAIL}, timeout=8).raise_for_status()),
+            ("UniProt",        lambda: requests.get("https://rest.uniprot.org/uniprotkb/search",
+                                   params={"query":"TP53","format":"json","size":1}, timeout=8).raise_for_status()),
+            ("iCite",          lambda: requests.get("https://icite.od.nih.gov/api/pubs",
+                                   params={"pmids":"31000001"}, timeout=8).raise_for_status()),
+            ("OpenTargets",    lambda: requests.post("https://api.platform.opentargets.org/api/v4/graphql",
+                                   json={"query":"{ meta { dataVersion { year } } }"}, timeout=10).raise_for_status()),
+            ("ClinicalTrials", lambda: requests.get("https://clinicaltrials.gov/api/v2/studies",
+                                   params={"query.term":"fibrosis","pageSize":1,"format":"json"}, timeout=10).raise_for_status()),
+            ("GWAS Catalog",   lambda: requests.get("https://www.ebi.ac.uk/gwas/rest/api/studies",
+                                   params={"size":1}, timeout=10).raise_for_status()),
+        ]
+
+        for _i, (_name, _fn) in enumerate(_api_checks):
+            _pf_prog.progress(_i / len(_api_checks), text=f"Checking {_name}...")
+            try:
+                _t0 = time.time()
+                _fn()
+                _pf_results[_name] = (True, int((time.time() - _t0) * 1000))
+            except Exception as _e:
+                _pf_results[_name] = (False, str(_e))
+
+        _pf_prog.progress(1.0, text="Done ✓")
+        st.session_state.api_check_results = _pf_results
+
+    # ── Display last check results ────────────────────────────────────────────
+    if st.session_state.api_check_results:
+        for _name, (_ok, _detail) in st.session_state.api_check_results.items():
+            _is_critical = _name in _CRITICAL_APIS
+            if _ok:
+                st.success(f"✅ {'🔴 ' if _is_critical else ''}**{_name}** — {_detail} ms")
+            else:
+                if _is_critical:
+                    st.error(f"❌ **{_name}** *(critical)* — {_detail}")
+                else:
+                    st.warning(f"⚠️ **{_name}** *(optional)* — {_detail}")
+    else:
+        st.caption("No check run yet.")
 
     st.divider()
 
     # ── LLM provider ──────────────────────────────────────────────────────
     st.subheader("LLM Provider")
 
-    if is_billy:
-        # ── Billy: deNBI or Groq only ─────────────────────────────────────
+    if not profile_set:
+        st.selectbox("Provider", options=["—"], disabled=True, key="_dummy_provider")
+        LLM_BASE_URL = ""; LLM_MODEL = ""; API_KEY = ""; PROVIDER = ""
+        NCBI_API_KEY = ""
+
+    elif is_billy:
         billy_provider = st.selectbox(
             "Provider",
             options=["deNBI", "Groq"],
@@ -143,6 +219,40 @@ with st.sidebar:
             LLM_BASE_URL = GROQ_BASE_URL
             LLM_MODEL    = groq_model_key
             PROVIDER     = "groq"
+
+        # ── LLM connection check ──────────────────────────────────────────
+        _llm_ready = bool(API_KEY) or PROVIDER == "denbi"
+        if st.button("Check LLM connection", key="llm_check_btn",
+                     disabled=not _llm_ready,
+                     help=None if _llm_ready else "Enter your API key first"):
+            try:
+                _t0 = time.time()
+                _tmp_llm = OpenAI(api_key=API_KEY if API_KEY else "ollama", base_url=LLM_BASE_URL)
+                _tmp_llm.chat.completions.create(
+                    model=LLM_MODEL, messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=1, timeout=15)
+                st.session_state.llm_check_result = (True, int((time.time() - _t0) * 1000))
+            except Exception as _e:
+                st.session_state.llm_check_result = (False, str(_e))
+
+        if st.session_state.llm_check_result is not None:
+            _lok, _ldetail = st.session_state.llm_check_result
+            if _lok:
+                st.success(f"✅ LLM connected — {_ldetail} ms")
+            else:
+                st.error(f"❌ LLM connection failed — {_ldetail}")
+
+        # ── Billy NCBI notice ─────────────────────────────────────────────
+        st.divider()
+        st.warning(
+            "⚠️ **Shared NCBI access** — Users are kindly asked not to run simultaneous "
+            "runs of GOAT due to NCBI request restrictions. If higher throughput is desired, "
+            "switch to **Mountain Goat — Explorer** where you can input your own NCBI API key. "
+            "You can create a personal NCBI account at "
+            "[ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/).",
+            icon="🐐",
+        )
+        NCBI_API_KEY = ""  # Billy uses shared unauthenticated access
 
     else:
         # ── Mountain Goat: full provider menu ────────────────────────────
@@ -237,16 +347,110 @@ with st.sidebar:
                                           placeholder="Paste your API key", key="custom_api_key")
             PROVIDER     = "custom"
 
+        # ── LLM connection check ──────────────────────────────────────────
+        _llm_ready = bool(API_KEY) or PROVIDER == "denbi"
+        if st.button("Check LLM connection", key="llm_check_btn",
+                     disabled=not _llm_ready,
+                     help=None if _llm_ready else "Enter your API key first"):
+            try:
+                _t0 = time.time()
+                _tmp_llm = OpenAI(api_key=API_KEY if API_KEY else "ollama", base_url=LLM_BASE_URL)
+                _tmp_llm.chat.completions.create(
+                    model=LLM_MODEL, messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=1, timeout=15)
+                st.session_state.llm_check_result = (True, int((time.time() - _t0) * 1000))
+            except Exception as _e:
+                st.session_state.llm_check_result = (False, str(_e))
+
+        if st.session_state.llm_check_result is not None:
+            _lok, _ldetail = st.session_state.llm_check_result
+            if _lok:
+                st.success(f"✅ LLM connected — {_ldetail} ms")
+            else:
+                st.error(f"❌ LLM connection failed — {_ldetail}")
+
+        # ── Mountain Goat: NCBI API key ───────────────────────────────────
+        st.divider()
+        st.markdown("**NCBI API Key** *(optional)*")
+        NCBI_API_KEY = st.text_input(
+            "NCBI API key", type="password",
+            placeholder="Paste your NCBI API key",
+            key="ncbi_api_key_goat",
+            label_visibility="collapsed",
+        )
+        st.caption(
+            "Increases NCBI query rate from 3 to 10 req/s. "
+            "Get a free key at [ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/)."
+        )
+
     st.divider()
 
     # ── Core inputs ───────────────────────────────────────────────────────────
     st.subheader("Core Inputs")
 
-    genes_raw = st.text_area(
-        "Gene list *",
-        placeholder="COL1A1, COL1A2, CTHRC1 ...\n(comma- or newline-separated)",
-        height=100,
+    # ── Gene input toggle ─────────────────────────────────────────────────────
+    gene_input_mode = st.radio(
+        "Gene input method",
+        options=["Enter genes manually", "Upload ranked list (.csv)"],
+        horizontal=True,
+        disabled=not profile_set,
+        key="gene_input_mode",
     )
+
+    RANKED_GENE_SCORES = {}
+    RANKED_SCORE_LABEL = ""
+    genes_raw = ""
+
+    if gene_input_mode == "Enter genes manually":
+        genes_raw = st.text_area(
+            "Gene list *",
+            placeholder="COL1A1, COL1A2, CTHRC1 ...\n(comma- or newline-separated)",
+            height=100,
+            disabled=not profile_set,
+        )
+    else:
+        st.caption("CSV format: column 1 = gene symbols, column 2 = score. Pre-rank from highest to lowest.")
+        _score_type = st.selectbox(
+            "Score type",
+            options=["logFC", "p-value", "score", "expression", "other"],
+            key="score_type_select",
+            disabled=not profile_set,
+        )
+        if _score_type == "other":
+            RANKED_SCORE_LABEL = st.text_input(
+                "Score label", placeholder="e.g. ATAC-seq signal", key="score_label_other",
+                disabled=not profile_set,
+            )
+        else:
+            RANKED_SCORE_LABEL = _score_type
+
+        _uploaded_csv = st.file_uploader(
+            "Upload ranked gene list (.csv)", type="csv", key="ranked_csv_uploader",
+            disabled=not profile_set,
+        )
+        if _uploaded_csv is not None:
+            try:
+                _rdf = pd.read_csv(_uploaded_csv, header=0)
+                _rdf.columns = [str(c).strip() for c in _rdf.columns]
+                _gene_col  = _rdf.columns[0]
+                _score_col = _rdf.columns[1]
+                RANKED_GENE_SCORES = {
+                    str(row[_gene_col]).strip(): row[_score_col]
+                    for _, row in _rdf.iterrows()
+                    if str(row[_gene_col]).strip()
+                }
+                genes_raw = ", ".join(RANKED_GENE_SCORES.keys())
+                st.success(f"Loaded {len(RANKED_GENE_SCORES)} genes from ranked list.")
+                st.dataframe(_rdf.head(10), use_container_width=True)
+                st.session_state.ranked_gene_scores = RANKED_GENE_SCORES
+                st.session_state.ranked_score_label = RANKED_SCORE_LABEL
+            except Exception as _e:
+                st.error(f"Could not parse CSV: {_e}")
+        else:
+            RANKED_GENE_SCORES = st.session_state.get("ranked_gene_scores", {})
+            RANKED_SCORE_LABEL = st.session_state.get("ranked_score_label", RANKED_SCORE_LABEL)
+            if RANKED_GENE_SCORES:
+                genes_raw = ", ".join(RANKED_GENE_SCORES.keys())
 
     organism_options = {
         "Homo sapiens":    "Human (Homo sapiens)",
@@ -257,30 +461,34 @@ with st.sidebar:
         "Organism *",
         options=list(organism_options.keys()),
         format_func=lambda k: organism_options[k],
+        disabled=not profile_set,
     )
     if selected_organism == "__other__":
-        UNIPROT_ORGANISM = st.text_input("Scientific name", placeholder="e.g. Rattus norvegicus")
+        UNIPROT_ORGANISM = st.text_input("Scientific name", placeholder="e.g. Rattus norvegicus",
+                                         disabled=not profile_set)
     else:
         UNIPROT_ORGANISM = selected_organism
 
-    ANALYSIS_NAME = st.text_input("Analysis name *", placeholder="e.g. liver_fibrosis_screen")
+    ANALYSIS_NAME = st.text_input("Analysis name *", placeholder="e.g. liver_fibrosis_screen",
+                                   disabled=not profile_set)
 
     st.divider()
 
     # ── Optional context ──────────────────────────────────────────────────────
     st.subheader("Optional Context")
-    DISEASE_CONTEXT = st.text_input("Disease context", placeholder="e.g. fibrosis")
-    ORGAN_CONTEXT   = st.text_input("Organ / tissue context", placeholder="e.g. liver")
-    OTHER_CONTEXT   = st.text_input("Other context", placeholder="e.g. splicing, transcriptomics")
-    NOTES           = st.text_area("Notes", placeholder="Documentation notes — sample metadata, experimental rationale, caveats, etc.", height=100, key="notes_field")
+    DISEASE_CONTEXT = st.text_input("Disease context", placeholder="e.g. fibrosis", disabled=not profile_set)
+    ORGAN_CONTEXT   = st.text_input("Organ / tissue context", placeholder="e.g. liver", disabled=not profile_set)
+    OTHER_CONTEXT   = st.text_input("Other context", placeholder="e.g. splicing, transcriptomics", disabled=not profile_set)
+    NOTES           = st.text_area("Notes", placeholder="Documentation notes — sample metadata, experimental rationale, caveats, etc.",
+                                   height=100, key="notes_field", disabled=not profile_set)
 
     st.divider()
 
     # ── PubMed search parameters ──────────────────────────────────────────────
     st.subheader("PubMed Parameters")
-    MAX_ABSTRACTS_PER_GENE = st.slider("Max abstracts per gene", 1, 50, 5)
-    YEAR_FROM = st.number_input("Year from", min_value=1900, max_value=2100, value=2020, step=1)
-    fallback_raw = st.text_input("Fallback year steps", value="2015, 2010, 2005, 2000")
+    MAX_ABSTRACTS_PER_GENE = st.slider("Max abstracts per gene", 1, 50, 5, disabled=not profile_set)
+    YEAR_FROM = st.number_input("Year from", min_value=1900, max_value=2100, value=2020, step=1, disabled=not profile_set)
+    fallback_raw = st.text_input("Fallback year steps", value="2015, 2010, 2005, 2000", disabled=not profile_set)
     try:
         FALLBACK_STEPS = [int(x.strip()) for x in fallback_raw.split(",") if x.strip()]
     except ValueError:
@@ -293,28 +501,27 @@ with st.sidebar:
     st.subheader("Database Modules")
     st.caption("Select the databases you wish to query.")
 
-    ENABLE_GO_PATHWAYS         = st.checkbox("GO Pathways + Reactome", value=True)
-    ENABLE_DRUG_TARGETS        = st.checkbox("Drug Targets",           value=True)
-    ENABLE_DISEASE_ASSOCIATION = st.checkbox("Disease Associations",   value=True)
-    ENABLE_CLINICAL_TRIALS     = st.checkbox("Clinical Trials",        value=True)
-    ENABLE_GWAS                = st.checkbox("GWAS Catalog",           value=True)
+    ENABLE_GO_PATHWAYS         = st.checkbox("GO Pathways + Reactome", value=True,  disabled=not profile_set)
+    ENABLE_DRUG_TARGETS        = st.checkbox("Drug Targets",           value=True,  disabled=not profile_set)
+    ENABLE_DISEASE_ASSOCIATION = st.checkbox("Disease Associations",   value=True,  disabled=not profile_set)
+    ENABLE_CLINICAL_TRIALS     = st.checkbox("Clinical Trials",        value=True,  disabled=not profile_set)
+    ENABLE_GWAS                = st.checkbox("GWAS Catalog",           value=True,  disabled=not profile_set)
 
     st.divider()
 
     # ── LLM synthesis module toggles ──────────────────────────────────────────
     st.subheader("LLM Synthesis Modules")
     st.caption("Select the synthesis modules you wish to run. Note that the Literature Synthesis module will always run.")
-    RUN_9A = st.checkbox("Literature Synthesis",  value=True, key="run_9a")
+    RUN_9A = st.checkbox("Literature Synthesis",  value=True, key="run_9a", disabled=not profile_set)
     _therapeutic_modules_enabled = ENABLE_DRUG_TARGETS or ENABLE_DISEASE_ASSOCIATION or ENABLE_CLINICAL_TRIALS or ENABLE_GWAS
-    RUN_9B = st.checkbox("Therapeutic Landscape", value=_therapeutic_modules_enabled, disabled=not (RUN_9A and _therapeutic_modules_enabled), key="run_9b")
-    RUN_9C = st.checkbox("Experimental Proposal", value=RUN_9A and RUN_9B,            disabled=not (RUN_9A and RUN_9B), key="run_9c")
-    RUN_9D = st.checkbox("Target Prioritisation", value=RUN_9A and RUN_9B and RUN_9C, disabled=not (RUN_9A and RUN_9B and RUN_9C), key="run_9d")
+    RUN_9B = st.checkbox("Therapeutic Landscape", value=_therapeutic_modules_enabled, disabled=not (profile_set and RUN_9A and _therapeutic_modules_enabled), key="run_9b")
+    RUN_9C = st.checkbox("Experimental Proposal", value=RUN_9A and RUN_9B,            disabled=not (profile_set and RUN_9A and RUN_9B), key="run_9c")
+    RUN_9D = st.checkbox("Target Prioritisation", value=RUN_9A and RUN_9B and RUN_9C, disabled=not (profile_set and RUN_9A and RUN_9B and RUN_9C), key="run_9d")
     if not _therapeutic_modules_enabled:
         st.caption("⚠️ Therapeutic Landscape requires at least one of: Drug Targets, Disease Associations, Clinical Trials, or GWAS Catalog.")
 
-    # ── LLM advanced config: hidden for Billy, collapsible for Mountain Goat ──
+    # ── LLM advanced config ──────────────────────────────────────────────────
     if is_billy:
-        # Fixed safe defaults — not exposed to Billy
         TEMP_LIT=0.10; THINK_LIT=False; PRESERVE_LIT=False
         TEMP_9A=0.20;  THINK_9A=False;  PRESERVE_9A=False
         TEMP_9B=0.20;  THINK_9B=False;  PRESERVE_9B=False
@@ -348,23 +555,29 @@ with st.sidebar:
             TEMP_9C,   THINK_9C,   PRESERVE_9C   = _module_row("Experimental (9C)",      "9c",   0.30, enabled=RUN_9C)
             TEMP_9D,   THINK_9D,   PRESERVE_9D   = _module_row("Target Prio. (9D)",      "9d",   0.10, enabled=RUN_9D)
 
+        # Default values when profile not set
+        if not profile_set:
+            TEMP_LIT=0.10; THINK_LIT=False; PRESERVE_LIT=False
+            TEMP_9A=0.20;  THINK_9A=False;  PRESERVE_9A=False
+            TEMP_9B=0.20;  THINK_9B=False;  PRESERVE_9B=False
+            TEMP_9C=0.30;  THINK_9C=False;  PRESERVE_9C=False
+            TEMP_9D=0.10;  THINK_9D=False;  PRESERVE_9D=False
+
     st.divider()
 
     # ── Scope flags ───────────────────────────────────────────────────────────
     st.subheader("Search Scope")
     st.caption("Select which context fields to include in each module's query.")
 
-    has_dis = bool(DISEASE_CONTEXT.strip())
-    has_org = bool(ORGAN_CONTEXT.strip())
-    has_oth = bool(OTHER_CONTEXT.strip())
+    has_dis = bool(DISEASE_CONTEXT.strip()) if profile_set else False
+    has_org = bool(ORGAN_CONTEXT.strip())   if profile_set else False
+    has_oth = bool(OTHER_CONTEXT.strip())   if profile_set else False
 
-    # Column header row
     _scope_header = st.columns([2, 1, 1, 1, 1])
     _scope_header[0].markdown("<span style='font-size:0.78em; color:gray; text-transform:uppercase; letter-spacing:0.05em;'>Module</span>", unsafe_allow_html=True)
     for _i, _lbl in enumerate(["Disease", "Organ", "Organism", "Other"], start=1):
         _scope_header[_i].markdown(f"<span style='font-size:0.78em; color:gray; text-transform:uppercase; letter-spacing:0.05em;'>{_lbl}</span>", unsafe_allow_html=True)
 
-    # PubMed row
     _pub_cols = st.columns([2, 1, 1, 1, 1])
     _pub_cols[0].markdown("**PubMed**")
     pubmed_d = _pub_cols[1].checkbox(" ", value=has_dis, disabled=not has_dis, key="pub_d", label_visibility="collapsed")
@@ -376,7 +589,6 @@ with st.sidebar:
 
     PUBMED_SCOPE = {"disease": pubmed_d, "organ": pubmed_o, "organism": pubmed_r, "other": pubmed_x}
 
-    # ClinicalTrials row
     _ct_cols = st.columns([2, 1, 1, 1, 1])
     _ct_cols[0].markdown("**Clinical Trials**")
     ct_d = _ct_cols[1].checkbox(" ", value=has_dis, disabled=not has_dis, key="ct_d", label_visibility="collapsed")
@@ -385,7 +597,6 @@ with st.sidebar:
     ct_x = _ct_cols[4].checkbox(" ", value=False,   disabled=not has_oth, key="ct_x", label_visibility="collapsed")
     CT_SCOPE = {"disease": ct_d, "organ": ct_o, "organism": False, "other": ct_x}
 
-    # LLM Synthesis row
     _llm_cols = st.columns([2, 1, 1, 1, 1])
     _llm_cols[0].markdown("**LLM Synthesis**")
     llm_d = _llm_cols[1].checkbox(" ", value=has_dis, disabled=not has_dis, key="llm_d", label_visibility="collapsed")
@@ -432,7 +643,49 @@ with st.sidebar:
             st.error(f"Could not load session: {e}")
 
     st.divider()
-    run_button = st.button("▶ Run GOAT", type="primary", width="stretch", key="run_btn")
+    run_button = st.button(
+        "▶ Run GOAT", type="primary", width="stretch", key="run_btn",
+        disabled=not profile_set,
+        help="Select a profile first." if not profile_set else None,
+    )
+
+# ── Soft-confirm dialog when known API failures exist ────────────────────────
+@st.dialog("⚠️ API connectivity issues detected")
+def _confirm_run_with_failures():
+    st.write(
+        "One or more APIs failed their connectivity check. "
+        "You can review the results in the **API Status** section of the sidebar. "
+        "Continue anyway?"
+    )
+    _col1, _col2 = st.columns(2)
+    if _col1.button("Continue", type="primary", key="dialog_continue"):
+        st.session_state._confirmed_run = True
+        st.rerun()
+    if _col2.button("Cancel", key="dialog_cancel"):
+        st.session_state._confirmed_run = False
+        st.rerun()
+
+# Initialise the confirmed-run flag if absent
+if "_confirmed_run" not in st.session_state:
+    st.session_state._confirmed_run = None
+
+# Determine whether any API check has failed
+_api_failures = [
+    name for name, (ok, _) in st.session_state.api_check_results.items() if not ok
+] if st.session_state.api_check_results else []
+_llm_failed = (
+    st.session_state.llm_check_result is not None
+    and not st.session_state.llm_check_result[0]
+)
+_has_failures = bool(_api_failures) or _llm_failed
+
+# On button click: open dialog if failures exist and not yet confirmed; else proceed
+if run_button:
+    if _has_failures and st.session_state._confirmed_run is None:
+        _confirm_run_with_failures()
+    else:
+        # Reset confirmation state so next run starts clean
+        st.session_state._confirmed_run = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -457,7 +710,7 @@ STRIP_PATTERNS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PIPELINE FUNCTIONS  (identical logic to notebook, display via st.write)
+# PIPELINE FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def clean_protein_name(name):
@@ -469,14 +722,17 @@ def clean_protein_name(name):
     return re.sub(r"\s{2,}", " ", cleaned).strip(" ,-")
 
 
-def fetch_ncbi_gene(gene, species, log, max_retries=3, base_sleep=1.0):
+def fetch_ncbi_gene(gene, species, log, max_retries=3, base_sleep=1.0, ncbi_api_key=""):
+    _sleep_interval = 0.12 if ncbi_api_key else 0.35
+    _key_param = {"api_key": ncbi_api_key} if ncbi_api_key else {}
     try:
         for attempt in range(1, max_retries + 1):
             try:
                 r = requests.get(
                     f"{NCBI_BASE}/esearch.fcgi",
                     params={"db": "gene", "term": f"{gene}[Gene Name] AND {species}[Organism]",
-                            "retmode": "json", "retmax": 1, "email": NCBI_EMAIL},
+                            "retmode": "json", "retmax": 1, "email": NCBI_EMAIL,
+                            **_key_param},
                     timeout=10
                 )
                 r.raise_for_status()
@@ -490,13 +746,14 @@ def fetch_ncbi_gene(gene, species, log, max_retries=3, base_sleep=1.0):
             log(f"    NCBI Gene: no results for {gene}")
             return None, None, None, None
         gene_id = ids[0]
-        time.sleep(0.35)
+        time.sleep(_sleep_interval)
 
         for attempt in range(1, max_retries + 1):
             try:
                 r2 = requests.get(
                     f"{NCBI_BASE}/efetch.fcgi",
-                    params={"db": "gene", "id": gene_id, "retmode": "xml", "email": NCBI_EMAIL},
+                    params={"db": "gene", "id": gene_id, "retmode": "xml", "email": NCBI_EMAIL,
+                            **_key_param},
                     timeout=20
                 )
                 r2.raise_for_status()
@@ -590,7 +847,9 @@ def resolve_uniprot(gene, organism, ensembl_from_ncbi=None, log=print):
 def search_pubmed_with_fallback(gene, official_full_name, max_results, year_from,
                                 min_hits, fallback_steps,
                                 PUBMED_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT,
-                                UNIPROT_ORGANISM, OTHER_CONTEXT, log=print):
+                                UNIPROT_ORGANISM, OTHER_CONTEXT, log=print, ncbi_api_key=""):
+    _sleep_interval = 0.12 if ncbi_api_key else 0.35
+    _key_param = {"api_key": ncbi_api_key} if ncbi_api_key else {}
     gene_term = f"{gene}[Title/Abstract]"
     if (official_full_name
             and official_full_name.lower() != gene.lower()
@@ -613,7 +872,8 @@ def search_pubmed_with_fallback(gene, official_full_name, max_results, year_from
     for idx, start_year in enumerate(windows):
         query  = f"{gene_term}{context_str} AND {start_year}:{TODAY_YEAR}[pdat]"
         params = {"db": "pubmed", "term": query, "retmax": max_results,
-                  "retmode": "json", "sort": "relevance", "email": NCBI_EMAIL}
+                  "retmode": "json", "sort": "relevance", "email": NCBI_EMAIL,
+                  **_key_param}
         try:
             r             = requests.get(f"{NCBI_BASE}/esearch.fcgi", params=params, timeout=15)
             r.raise_for_status()
@@ -623,7 +883,7 @@ def search_pubmed_with_fallback(gene, official_full_name, max_results, year_from
             if len(ids) >= min_hits or idx == len(windows) - 1:
                 return ids, window_label, fallback_note
             log(f"    Only {len(ids)} hit(s) for {start_year}-{TODAY_YEAR}, widening...")
-            time.sleep(0.35)
+            time.sleep(_sleep_interval)
         except Exception as e:
             log(f"    PubMed search error: {e}")
             return [], f"{start_year}-{TODAY_YEAR}", ""
@@ -642,11 +902,13 @@ def extract_year(art):
     return "n.d."
 
 
-def fetch_abstracts(pmids, log=print):
+def fetch_abstracts(pmids, log=print, ncbi_api_key=""):
     if not pmids:
         return []
+    _key_param = {"api_key": ncbi_api_key} if ncbi_api_key else {}
     params = {"db": "pubmed", "id": ",".join(pmids),
-              "retmode": "xml", "rettype": "abstract", "email": NCBI_EMAIL}
+              "retmode": "xml", "rettype": "abstract", "email": NCBI_EMAIL,
+              **_key_param}
     try:
         r    = requests.get(f"{NCBI_BASE}/efetch.fcgi", params=params, timeout=30)
         r.raise_for_status()
@@ -744,7 +1006,7 @@ def synthesise_literature(gene, protein_name, refseq_summary, articles,
                            llm, LLM_MODEL, MAX_ABSTRACTS_PER_GENE,
                            LLM_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT, OTHER_CONTEXT,
                            temperature=0.1, enable_thinking=False, preserve_thinking=False,
-                           log=print):
+                           log=print, ranking_context=""):
     if not articles:
         return "No abstracts available for synthesis.", 0
 
@@ -758,10 +1020,12 @@ def synthesise_literature(gene, protein_name, refseq_summary, articles,
         )
     context  = "\n\n---\n\n".join(parts)
     name_str = f"{gene} ({protein_name})" if protein_name else gene
-    refseq_ctx = f"RefSeq summary: {refseq_summary}\n\n" if refseq_summary else ""
+    refseq_ctx   = f"RefSeq summary: {refseq_summary}\n\n" if refseq_summary else ""
+    ranking_line = f"Ranking context: {ranking_context}\n" if ranking_context else ""
     user_msg   = (
         f"Gene/protein: {name_str}\n"
         + (f"Context: {context_desc}\n" if context_desc != "a biological context" else "")
+        + ranking_line
         + f"\n{refseq_ctx}"
         + f"Abstracts (ranked highest citations first):\n{context}"
     )
@@ -1130,18 +1394,33 @@ def build_sankey_fig(df, label_col, title, min_shared=2,
     return fig
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# LLM CLIENT — created from sidebar values on every page load, always available
-# ══════════════════════════════════════════════════════════════════════════════
-# This must live outside `if run_button:` so that the LLM synthesis tab
-# can call it after a re-run triggered by a download button click.
-llm = OpenAI(api_key=API_KEY if API_KEY else "ollama", base_url=LLM_BASE_URL)
+def build_wordcloud_fig(df, label_col, title):
+    """Build a word cloud from term frequencies across genes."""
+    if df.empty or not _WORDCLOUD_AVAILABLE:
+        return None
+    term_counts = df.groupby(label_col)["gene"].nunique()
+    freq_dict   = {term: int(count) for term, count in term_counts.items() if term}
+    if not freq_dict:
+        return None
+    wc = WordCloud(
+        width=600, height=350, background_color=None, mode="RGBA",
+        colormap="tab10", prefer_horizontal=0.85,
+        max_words=80, min_font_size=9,
+    ).generate_from_frequencies(freq_dict)
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.imshow(wc, interpolation="bilinear")
+    ax.axis("off")
+    ax.set_title(title, fontsize=11, pad=8)
+    fig.patch.set_alpha(0.0)
+    plt.tight_layout(pad=0.5)
+    return fig
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN — run pipeline when button is clicked
+# Proceeds when: (a) no API failures known, or (b) user confirmed via dialog
 # ══════════════════════════════════════════════════════════════════════════════
-if run_button:
+if run_button and (not _has_failures or st.session_state._confirmed_run is True):
     # ── Validation ────────────────────────────────────────────────────────────
     errors = []
     raw_genes = genes_raw.replace("\n", ",")
@@ -1162,6 +1441,12 @@ if run_button:
             st.error(e)
         st.stop()
 
+    # ── LLM client — instantiated here with validated credentials ─────────────
+    llm = OpenAI(api_key=API_KEY if API_KEY else "ollama", base_url=LLM_BASE_URL)
+    st.session_state.llm_base_url = LLM_BASE_URL
+    st.session_state.llm_api_key  = API_KEY
+    st.session_state.llm_model    = LLM_MODEL
+
     # ── Status area ───────────────────────────────────────────────────────────
     status_box = st.empty()
     log_lines  = []
@@ -1173,6 +1458,10 @@ if run_button:
     log(f"GOAT pipeline starting — {len(GENE_LIST)} gene(s)")
     log(f"  Provider : {PROVIDER}  |  Model : {LLM_MODEL}")
     log(f"  Organism : {UNIPROT_ORGANISM}")
+    if NCBI_API_KEY:
+        log(f"  NCBI API key: ✓ (10 req/s)")
+    else:
+        log(f"  NCBI API key: not set (3 req/s)")
     log("-" * 55)
 
     results        = []
@@ -1181,6 +1470,11 @@ if run_button:
     total_tokens   = 0
     pipeline_start = time.time()
 
+    # Ranked list — may be empty if manual input was used
+    RANKED_GENE_SCORES = st.session_state.get("ranked_gene_scores", {})
+    RANKED_SCORE_LABEL = st.session_state.get("ranked_score_label", "score")
+    _n_ranked = len(RANKED_GENE_SCORES)
+
     prog = st.progress(0, text="Starting...")
 
     for i, gene in enumerate(GENE_LIST):
@@ -1188,7 +1482,7 @@ if run_button:
         log(f"\n[{i+1}/{len(GENE_LIST)}] {gene}")
 
         ncbi_gene_id, official_full_name, refseq_summary, ensembl_from_ncbi = \
-            fetch_ncbi_gene(gene, UNIPROT_ORGANISM, log)
+            fetch_ncbi_gene(gene, UNIPROT_ORGANISM, log, ncbi_api_key=NCBI_API_KEY)
         log(f"    NCBI: {ncbi_gene_id or 'not found'} | {official_full_name or 'N/A'} | Ensembl: {ensembl_from_ncbi or 'not found'}")
 
         uniprot_id, protein_name, ensembl_gene_id, go_bp_terms, reactome_paths = \
@@ -1207,7 +1501,7 @@ if run_button:
             gene, official_full_name, MAX_ABSTRACTS_PER_GENE,
             YEAR_FROM, MIN_HITS_BEFORE_FALLBACK, FALLBACK_STEPS,
             PUBMED_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT,
-            UNIPROT_ORGANISM, OTHER_CONTEXT, log)
+            UNIPROT_ORGANISM, OTHER_CONTEXT, log, ncbi_api_key=NCBI_API_KEY)
         log(f"    Found {len(pmids)} article(s) [{window}{fallback_note}]")
         time.sleep(0.4)
 
@@ -1219,6 +1513,9 @@ if run_button:
             "protein_name": protein_name or "N/A",
             "ensembl_gene_id": ensembl_gene_id or "N/A",
             "go_bp_count": len(go_bp_terms), "reactome_count": len(reactome_paths),
+            "ranking_score":    RANKED_GENE_SCORES.get(gene, None),
+            "ranking_label":    RANKED_SCORE_LABEL if RANKED_GENE_SCORES else None,
+            "ranking_position": list(RANKED_GENE_SCORES.keys()).index(gene) + 1 if gene in RANKED_GENE_SCORES else None,
         }
 
         if not pmids:
@@ -1227,7 +1524,7 @@ if run_button:
             continue
 
         log(f"    Fetching abstracts...")
-        articles = fetch_abstracts(pmids, log)
+        articles = fetch_abstracts(pmids, log, ncbi_api_key=NCBI_API_KEY)
         log(f"    Retrieved {len(articles)} abstract(s)")
         time.sleep(0.4)
 
@@ -1244,13 +1541,21 @@ if run_button:
         log(f"    Ranked by citations (top: {articles[0]['citations']})")
         time.sleep(0.3)
 
+        # Build ranking context string for LLM
+        _rank_ctx = ""
+        if RANKED_GENE_SCORES and gene in RANKED_GENE_SCORES:
+            _pos   = list(RANKED_GENE_SCORES.keys()).index(gene) + 1
+            _score = RANKED_GENE_SCORES[gene]
+            _rank_ctx = f"This gene ranked #{_pos} of {_n_ranked} ({RANKED_SCORE_LABEL} = {_score})"
+
         log(f"    LLM synthesis ({LLM_MODEL})...")
         llm_synthesis, tokens = synthesise_literature(
             gene, protein_name, refseq_summary, articles,
             llm, LLM_MODEL, MAX_ABSTRACTS_PER_GENE,
             LLM_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT, OTHER_CONTEXT,
             temperature=TEMP_LIT, enable_thinking=THINK_LIT,
-            preserve_thinking=PRESERVE_LIT, log=log)
+            preserve_thinking=PRESERVE_LIT, log=log,
+            ranking_context=_rank_ctx)
         total_tokens += tokens
 
         pmid_to_idx        = {a["pmid"]: idx + 1 for idx, a in enumerate(articles)}
@@ -1274,7 +1579,6 @@ if run_button:
     core_elapsed = time.time() - pipeline_start
     log(f"\nCore pipeline complete — {sum(1 for r in results if r.get('status')=='OK')} OK | {total_tokens:,} tokens | {fmt_runtime(core_elapsed)}")
 
-    # ── Persist to session_state so downloads don't wipe results ─────────────
     st.session_state.results       = results
     st.session_state.go_bp_data    = go_bp_data
     st.session_state.reactome_data = reactome_data
@@ -1283,7 +1587,6 @@ if run_button:
         "core": {"tokens": total_tokens, "runtime": core_elapsed},
     }
 
-    # ── Log usage (GDPR-safe: date, profile, gene count, modules, provider) ───
     _modules_run = [m for m, enabled in [
         ("GO/Reactome",    ENABLE_GO_PATHWAYS),
         ("Drug Targets",   ENABLE_DRUG_TARGETS),
@@ -1303,11 +1606,10 @@ if run_button:
         provider   = PROVIDER,
     )
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # DISPLAY RESULTS
-    # ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# DISPLAY RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
 
-# Show results whenever pipeline_done is True (survives re-runs / downloads)
 if st.session_state.pipeline_done:
     results       = st.session_state.results
     go_bp_data    = st.session_state.go_bp_data
@@ -1322,11 +1624,14 @@ if st.session_state.pipeline_done:
         ok = df[df["status"] == "OK"]
         if not ok.empty:
             display_cols = [c for c in ["gene","official_full_name","uniprot_id",
-                                         "ensembl_gene_id","articles_found","status"]
+                                         "ensembl_gene_id","ranking_position","ranking_score",
+                                         "articles_found","status"]
                             if c in ok.columns]
             st.dataframe(ok[display_cols], width="stretch")
             for _, r in ok.iterrows():
                 with st.expander(f"📄 {r['gene']} — {r.get('official_full_name','N/A')}"):
+                    if r.get("ranking_position") is not None:
+                        st.markdown(f"**Ranking context:** #{int(r['ranking_position'])} of {len(ok)} ({r.get('ranking_label','score')} = {r.get('ranking_score','N/A')})")
                     st.markdown(f"**RefSeq summary:** {r.get('refseq_summary','N/A')}")
                     st.markdown(f"**Literature synthesis:** {r.get('llm_summary_papers','N/A')}")
                     if r.get("references") and r["references"] not in ("N/A",""):
@@ -1342,7 +1647,6 @@ if st.session_state.pipeline_done:
         elif not go_bp_data and not reactome_data:
             st.warning("No GO/Reactome data found.")
         else:
-            # Pathway summaries
             def build_pathway_summary(gene):
                 go_gene_terms    = [d["go_term"]      for d in go_bp_data    if d["gene"] == gene]
                 react_gene_paths = [d["pathway_name"] for d in reactome_data if d["gene"] == gene]
@@ -1368,18 +1672,48 @@ if st.session_state.pipeline_done:
 
             if not df_go.empty:
                 st.markdown("### GO Biological Process")
-                fig = build_sankey_fig(df_go, "go_term",
+                _go_sankey = build_sankey_fig(df_go, "go_term",
                     f"GO Biological Process{' — '+context_suffix if context_suffix else ''}",
                     gene_color="#4E79A7", term_color="#F28E2B")
-                if fig: st.plotly_chart(fig, width="stretch")
+                _go_wc = build_wordcloud_fig(df_go, "go_term",
+                    f"GO BP Term Frequency{' — '+context_suffix if context_suffix else ''}")
+                if _go_sankey or _go_wc:
+                    _col_s, _col_w = st.columns([1, 1])
+                    with _col_s:
+                        if _go_sankey:
+                            st.plotly_chart(_go_sankey, use_container_width=True)
+                        else:
+                            st.info("Sankey unavailable.")
+                    with _col_w:
+                        if _go_wc:
+                            st.pyplot(_go_wc, use_container_width=True)
+                        elif not _WORDCLOUD_AVAILABLE:
+                            st.info("Install `wordcloud` library for word clouds.")
+                        else:
+                            st.info("Word cloud unavailable.")
                 st.dataframe(df_go, width="stretch")
 
             if not df_reactome.empty:
                 st.markdown("### Reactome Pathways")
-                fig = build_sankey_fig(df_reactome, "pathway_name",
+                _react_sankey = build_sankey_fig(df_reactome, "pathway_name",
                     f"Reactome Pathways{' — '+context_suffix if context_suffix else ''}",
                     gene_color="#4E79A7", term_color="#59A14F")
-                if fig: st.plotly_chart(fig, width="stretch")
+                _react_wc = build_wordcloud_fig(df_reactome, "pathway_name",
+                    f"Reactome Pathway Frequency{' — '+context_suffix if context_suffix else ''}")
+                if _react_sankey or _react_wc:
+                    _col_s, _col_w = st.columns([1, 1])
+                    with _col_s:
+                        if _react_sankey:
+                            st.plotly_chart(_react_sankey, use_container_width=True)
+                        else:
+                            st.info("Sankey unavailable.")
+                    with _col_w:
+                        if _react_wc:
+                            st.pyplot(_react_wc, use_container_width=True)
+                        elif not _WORDCLOUD_AVAILABLE:
+                            st.info("Install `wordcloud` library for word clouds.")
+                        else:
+                            st.info("Word cloud unavailable.")
                 st.dataframe(df_reactome, width="stretch")
 
     # ── Tab 3: Drugs & Diseases ───────────────────────────────────────────────
@@ -1509,6 +1843,17 @@ if st.session_state.pipeline_done:
             if not successful:
                 st.warning("No successful gene results to synthesise.")
             else:
+                # Re-instantiate LLM client from credentials stored at run time.
+                # This is necessary because llm is no longer module-level — it is
+                # created inside `if run_button:` where credentials are guaranteed
+                # valid. On subsequent reruns (e.g. triggered by download buttons)
+                # run_button is False, so we rebuild from session state here.
+                llm = OpenAI(
+                    api_key=st.session_state.llm_api_key if st.session_state.llm_api_key else "ollama",
+                    base_url=st.session_state.llm_base_url,
+                )
+                LLM_MODEL = st.session_state.llm_model
+
                 context_desc = build_context_desc(LLM_SCOPE, DISEASE_CONTEXT, ORGAN_CONTEXT, OTHER_CONTEXT)
 
                 def build_persona_context():
@@ -1538,6 +1883,8 @@ if st.session_state.pipeline_done:
                         f"  Literature synthesis: {r.get('llm_summary_papers','N/A')}",
                         f"  Literature: {r.get('articles_found',0)} abstracts, window {r.get('search_window_used','N/A')}",
                     ]
+                    if r.get("ranking_position") is not None:
+                        lines.insert(1, f"  Ranking context: #{r['ranking_position']} of {len(successful)} ({r.get('ranking_label','score')} = {r.get('ranking_score','N/A')})")
                     if r.get("references") and r["references"] not in ("N/A",""):
                         lines.append(f"  References:\n{r['references']}")
                     if r.get("pathway_summary") and r["pathway_summary"] != "N/A":
@@ -1586,10 +1933,6 @@ if st.session_state.pipeline_done:
                 synthesis_results = st.session_state.synthesis_results
                 synthesis_tables  = st.session_state.synthesis_tables
 
-                # ── Only call the LLM if synthesis hasn't been run yet ────────
-                # After a download re-run, session_state still has the results
-                # so we skip straight to the display block below.
-                # Determine which sections should run based on toggles + cached state
                 should_run = {
                     "9a": RUN_9A,
                     "9b": RUN_9B,
@@ -1602,7 +1945,6 @@ if st.session_state.pipeline_done:
                 )
 
                 if not already_done:
-                    # ── Only runs once; skipped on re-runs from downloads ─────
                     digest = "\n\n".join(build_digest(r) for r in successful)
                     run_metrics = st.session_state.run_metrics
 
@@ -1741,16 +2083,10 @@ Exactly 3 sentences:
 ## Experimental hypotheses
 2 to 3 hypotheses, each as a falsifiable statement in the form: "Gene X does Y in the context of Z."
 Table columns: | # | Hypothesis | Evidence basis | Key assumption | Caveat |
-- Evidence basis: the specific evidence layer(s) this hypothesis is drawn from — per-gene data, biological synthesis, or therapeutic landscape.
-- Key assumption: the main unstated premise that must hold for the hypothesis to be testable.
-- Caveat: the most significant limitation or risk to testing this hypothesis.
 
 ## Proposed experiments
-One or more experiments per hypothesis where warranted. The model should determine the most appropriate experiment type — in vitro, in vivo, ex vivo, or patient-derived — based on the hypothesis and the available evidence. Justify the choice of experiment type in the Rationale column.
-Table columns: | # | Experiment type | Model system | Perturbation | Primary readout | Rationale for experiment type | Caveat |
-- Experiment type: in vitro / in vivo / ex vivo / patient-derived.
-- Primary readout: the specific measurable outcome that would confirm or refute the hypothesis — be precise enough that a researcher could design the experiment from this description.
-- Rationale for experiment type: one brief phrase explaining why this experiment type is most appropriate for this hypothesis."""
+One or more experiments per hypothesis where warranted.
+Table columns: | # | Experiment type | Model system | Perturbation | Primary readout | Rationale for experiment type | Caveat |"""
 
                     prior_9ab = ""
                     if synthesis_tables.get("9a"):
@@ -1774,36 +2110,27 @@ Table columns: | # | Experiment type | Model system | Perturbation | Primary rea
 CONSTRAINTS (apply to every section):
 - Base prioritisation on all provided evidence layers: per-gene data, biological synthesis, therapeutic landscape, disease associations, and GWAS data.
 - Apply the following ranking hierarchy per target:
-    1. Strength of disease association and GWAS evidence — direct genetic or associative links to the disease context.
+    1. Strength of disease association and GWAS evidence.
     2. Therapeutic evidence — existing drugs, clinical trial status, and OT association scores.
-    3. Mechanistic specificity — how well-characterised is the gene's role in the disease pathway from the biological synthesis.
-- Overall priority criteria:
-    High: strong evidence across all three criteria, with disease association always required.
-    Medium: strong evidence in one or two criteria, or moderate evidence across all three.
-    Low: evidence in only one criterion, or weak evidence across multiple.
-    N/A: no evidence across any layer — exclude from ranking.
+    3. Mechanistic specificity — how well-characterised is the gene's role in the disease pathway.
 - Overall priority values are strictly: High / Medium / Low. No intermediate values.
 - Aim for concision — this is an orientation document for a research team, not an exhaustive review.
 - If a section cannot be supported by the data, write: "Insufficient data to assess."
 
-TASK: Produce an integrated target prioritisation for the provided gene set in the context of {context_desc}. The goal is to synthesise all evidence layers into a clear, actionable recommendation that a research team can use to focus their efforts.
+TASK: Produce an integrated target prioritisation for the provided gene set in the context of {context_desc}.
 
 OUTPUT FORMAT: Markdown only. Use the headings below in exactly this order. Do not add extra headings, a conclusion, or a preamble.
 
 ## Overview
 Exactly 4 sentences:
-1. A clear recommendation on where the research team should focus based on the full evidence across the gene set.
-2. The top 1–2 targets and the specific evidence that makes them the strongest candidates.
-3. The most significant opportunity or gap that the ranking reveals.
-4. One sentence on what would most change this prioritisation if new evidence became available.
+1. A clear recommendation on where the research team should focus.
+2. The top 1–2 targets and the specific evidence that makes them strongest candidates.
+3. The most significant opportunity or gap revealed.
+4. What would most change this prioritisation if new evidence became available.
 
 ## Top target summary
-Rank at least 5 but up to 10 targets with available evidence. If fewer than 5 targets have sufficient evidence to rank, include all available and note the limited coverage in the Overview.
-Table columns: | Rank | Gene | Protein name | Disease association and GWAS | Therapeutic evidence | Mechanistic specificity | Overall priority |
-- Disease association and GWAS: one phrase summarising the strength of genetic or associative evidence.
-- Therapeutic evidence: one phrase summarising drug, trial, or OT score evidence.
-- Mechanistic specificity: one phrase on how well-characterised the gene's role is in the disease pathway.
-- Overall priority: High / Medium / Low only, applied strictly using the ranking criteria above."""
+Rank at least 5 but up to 10 targets with available evidence.
+Table columns: | Rank | Gene | Protein name | Disease association and GWAS | Therapeutic evidence | Mechanistic specificity | Overall priority |"""
 
                     prior_9abd = prior_9ab
                     if synthesis_results.get("9c"):
@@ -1822,7 +2149,6 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
 
                     st.session_state.synthesis_results = synthesis_results
                     st.session_state.synthesis_tables  = synthesis_tables
-                    # Store per-module settings alongside metrics for display
                     for _key, _temp, _think, _preserve in [
                         ("core",     TEMP_LIT, THINK_LIT, PRESERVE_LIT),
                         ("9a",       TEMP_9A,  THINK_9A,  PRESERVE_9A),
@@ -1855,12 +2181,12 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                         m = _metrics.get(key)
                         if m:
                             _metric_rows.append({
-                                "Section":          label,
-                                "Temperature":      f"{m.get('temperature', '—')}",
-                                "Thinking":         "✓" if m.get("enable_thinking") else "—",
-                                "Preserve":         "✓" if m.get("preserve_thinking") else "—",
-                                "Tokens":           f"{m['tokens']:,}",
-                                "Runtime":          fmt_runtime(m["runtime"]),
+                                "Section":     label,
+                                "Temperature": f"{m.get('temperature', '—')}",
+                                "Thinking":    "✓" if m.get("enable_thinking") else "—",
+                                "Preserve":    "✓" if m.get("preserve_thinking") else "—",
+                                "Tokens":      f"{m['tokens']:,}",
+                                "Runtime":     fmt_runtime(m["runtime"]),
                             })
                             total_llm_tok += m["tokens"]
                             total_llm_rt  += m["runtime"]
@@ -1877,7 +2203,6 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                     st.dataframe(pd.DataFrame(_metric_rows), width="stretch", hide_index=True)
                     st.markdown("---")
 
-                # ── Display (runs every render, cached or freshly generated) ──
                 section_labels = [
                     ("9a", "Biological Synthesis"),
                     ("9b", "Therapeutic Landscape"),
@@ -1888,7 +2213,6 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                     if synthesis_results.get(key):
                         st.markdown(f"---\n### {title}")
                         body = synthesis_results[key]
-                        # Strip duplicate leading heading the LLM sometimes outputs
                         body = re.sub(r"(?im)^#{1,3}\s+Top\s+target\s+summary\s*\n", "", body, count=1)
                         body = re.sub(r"(?im)^#{1,3}\s+Therapeutic\s+landscape\s+overview\s*\n", "### Overview\n", body, count=1)
                         st.markdown(body)
@@ -1898,227 +2222,242 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
     # ── Tab 7: Export ─────────────────────────────────────────────────────────
     with tabs[6]:
         st.subheader("Export Results")
-        st.caption("All downloads are pre-built — clicking them will not restart the pipeline.")
+        st.caption("Downloads are built on demand — clicking them will not restart the pipeline.")
 
-        # Pull everything from session_state so downloads are always safe
         _results       = st.session_state.results
         _go_bp_data    = st.session_state.go_bp_data
+        _reactome_data = st.session_state.reactome_data
         _synth_results = st.session_state.synthesis_results
         _synth_tables  = st.session_state.synthesis_tables
 
         df_export = pd.DataFrame(_results)
         EXPORT_COLS = [
             "gene","official_full_name","uniprot_id","protein_name","ensembl_gene_id",
+            "ranking_position","ranking_score","ranking_label",
             "refseq_summary","pathway_summary","llm_summary_papers","references",
             "search_window_used","articles_found","chembl_molecules","ot_disease_association",
             "active_trials","trial_phases","gwas_hits","gwas_traits","status"
         ]
         csv_cols = [c for c in EXPORT_COLS if c in df_export.columns]
 
-        # Use a fixed timestamp from session so filenames don't change on re-run
         if "export_ts" not in st.session_state:
             st.session_state.export_ts = datetime.now().strftime("%Y%m%d_%H%M")
         ts       = st.session_state.export_ts
         safe_ctx = re.sub(r"[^\w\-]", "_", DISEASE_CONTEXT or "no_context")
         prefix   = f"{ts}_{ANALYSIS_NAME}_{safe_ctx}"
 
-        # ── Build Markdown once ───────────────────────────────────────────────
-        _metrics = st.session_state.run_metrics
-        _metrics_md = ""
-        if _metrics:
-            _section_map = [
-                ("core",     "Core pipeline (per-gene LLM)"),
-                ("9a",       "9A — Biological Synthesis"),
-                ("9a-table", "9A — Compact Table"),
-                ("9b",       "9B — Therapeutic Landscape"),
-                ("9c",       "9C — Experimental Proposals"),
-                ("9d",       "9D — Target Prioritisation"),
-            ]
-            _mlines = [
-                "## Run Summary\n",
-                "| Section | Temperature | Thinking | Preserve | Tokens | Runtime |",
-                "| --- | ---: | :---: | :---: | ---: | --- |",
-            ]
-            total_tok, total_rt = 0, 0.0
-            for key, label in _section_map:
-                m = _metrics.get(key)
-                if m:
-                    _mlines.append(
-                        f"| {label} | {m.get('temperature', '—')} "
-                        f"| {'✓' if m.get('enable_thinking') else '—'} "
-                        f"| {'✓' if m.get('preserve_thinking') else '—'} "
-                        f"| {m['tokens']:,} | {fmt_runtime(m['runtime'])} |"
-                    )
-                    total_tok += m["tokens"]
-                    total_rt  += m["runtime"]
-            _mlines.append(f"| **Total** | — | — | — | **{total_tok:,}** | **{fmt_runtime(total_rt)}** |")
-            _metrics_md = "\n".join(_mlines) + "\n\n---\n"
+        col1, col2, col3 = st.columns(3)
 
-        _meta = [
-            "# Gene Research Report\n",
-            f"**Analysis name:** {ANALYSIS_NAME}  ",
-            f"**Disease context:** {DISEASE_CONTEXT}  ",
-            f"**Organ context:** {ORGAN_CONTEXT or 'N/A'}  ",
-            f"**Other context:** {OTHER_CONTEXT or 'N/A'}  ",
-            f"**Organism:** {UNIPROT_ORGANISM}  ",
-            f"**Genes:** {', '.join(r['gene'] for r in _results if r.get('status')=='OK')}  ",
-            f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  \n\n---\n",
-        ] + ([f"\n> **Notes:** {NOTES}\n"] if NOTES and NOTES.strip() else []) + [
-            "\n## Core Results\n",
-        ]
-        for r in _results:
-            if r.get("status") != "OK": continue
-            pname  = r.get("protein_name","N/A")
-            header = r["gene"] + (f" — {pname}" if pname and pname != "N/A" else "")
-            _meta.append(f"\n### {header}")
-            for k, label in [
-                ("official_full_name","Official full name"),
-                ("uniprot_id","UniProt accession"),
-                ("ensembl_gene_id","Ensembl gene ID"),
-                ("refseq_summary","RefSeq summary"),
-                ("pathway_summary","Pathway summary"),
-                ("llm_summary_papers","Literature synthesis"),
-                ("references","References"),
-                ("chembl_molecules","Known drugs (ChEMBL)"),
-                ("ot_disease_association","Disease associations (OT)"),
-                ("active_trials","Active clinical trials"),
-                ("gwas_traits","GWAS traits"),
-            ]:
-                val = r.get(k)
-                if val is not None and str(val) not in ("N/A","None",""):
-                    _meta.append(f"- **{label}:** {val}")
-
-        for key, title in [("9a","Biological Synthesis"),("9b","Therapeutic Landscape"),
-                            ("9c","Experimental Proposals"),("9d","Top Target Summary")]:
-            if _synth_results.get(key):
-                body = _synth_results[key]
-                body = re.sub(r"(?im)^#{1,3}\s+Top\s+target\s+summary\s*\n", "", body, count=1)
-                body = re.sub(r"(?im)^#{1,3}\s+Therapeutic\s+landscape\s+overview\s*\n", "### Overview\n", body, count=1)
-                _meta.append(f"\n---\n\n## {title}\n\n{body}")
-            if _synth_tables.get(key):
-                _meta.append(_synth_tables[key])
-
-        md_content = _metrics_md + "\n".join(_meta)
-
-        # ── Build HTML from Markdown ──────────────────────────────────────────
-        try:
-            import markdown as md_lib
-            html_body = md_lib.markdown(
-                md_content,
-                extensions=["tables", "fenced_code", "toc"]
+        # ── 1. Main CSV ───────────────────────────────────────────────────────
+        with col1:
+            _csv_buf = StringIO()
+            df_export[csv_cols].to_csv(_csv_buf, index=False)
+            st.download_button(
+                label="⬇️ Main CSV",
+                data=_csv_buf.getvalue(),
+                file_name=f"{prefix}_gene_research.csv",
+                mime="text/csv",
+                key="dl_csv",
             )
-        except ImportError:
-            # Fallback: wrap plain text if markdown package missing
-            html_body = f"<pre>{html_lib.escape(md_content)}</pre>"
 
-        html_content = f"""<!DOCTYPE html>
+        # ── 2. GO terms CSV ───────────────────────────────────────────────────
+        with col2:
+            if _go_bp_data:
+                _go_buf = StringIO()
+                pd.DataFrame(_go_bp_data).to_csv(_go_buf, index=False)
+                st.download_button(
+                    label="⬇️ GO terms CSV",
+                    data=_go_buf.getvalue(),
+                    file_name=f"{prefix}_go_bp_terms.csv",
+                    mime="text/csv",
+                    key="dl_go_csv",
+                )
+            else:
+                st.button("⬇️ GO terms CSV", disabled=True, key="dl_go_csv_disabled",
+                          help="No GO data available.")
+
+        # ── 3. HTML report (with embedded plots, built lazily) ────────────────
+        with col3:
+            def _build_html_report():
+                import plotly.io as pio
+                _meta_lines = [
+                    "<h1>🐐 GOAT — Gene Research Report</h1>",
+                    f"<p><b>Analysis name:</b> {html_lib.escape(ANALYSIS_NAME)}</p>",
+                    f"<p><b>Disease context:</b> {html_lib.escape(DISEASE_CONTEXT or 'N/A')}</p>",
+                    f"<p><b>Organ context:</b> {html_lib.escape(ORGAN_CONTEXT or 'N/A')}</p>",
+                    f"<p><b>Other context:</b> {html_lib.escape(OTHER_CONTEXT or 'N/A')}</p>",
+                    f"<p><b>Organism:</b> {html_lib.escape(UNIPROT_ORGANISM)}</p>",
+                    f"<p><b>Genes:</b> {html_lib.escape(', '.join(r['gene'] for r in _results if r.get('status')=='OK'))}</p>",
+                    f"<p><b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>",
+                ]
+                if NOTES and NOTES.strip():
+                    _meta_lines.append(f"<blockquote><b>Notes:</b> {html_lib.escape(NOTES)}</blockquote>")
+
+                # ── Enrichment plots ──────────────────────────────────────────
+                _plot_html = ""
+                _df_go_ex    = pd.DataFrame(_go_bp_data)    if _go_bp_data    else pd.DataFrame()
+                _df_react_ex = pd.DataFrame(_reactome_data) if _reactome_data else pd.DataFrame()
+                _ctx_sfx     = DISEASE_CONTEXT or ""
+                if ORGAN_CONTEXT:
+                    _ctx_sfx += f" ({ORGAN_CONTEXT})" if _ctx_sfx else ORGAN_CONTEXT
+
+                if not _df_go_ex.empty:
+                    _fig_go = build_sankey_fig(_df_go_ex, "go_term",
+                        f"GO Biological Process{' — '+_ctx_sfx if _ctx_sfx else ''}",
+                        gene_color="#4E79A7", term_color="#F28E2B")
+                    if _fig_go:
+                        _plot_html += "<h2>GO Biological Process</h2>"
+                        _plot_html += pio.to_html(_fig_go, full_html=False, include_plotlyjs="cdn")
+
+                if not _df_react_ex.empty:
+                    _fig_react = build_sankey_fig(_df_react_ex, "pathway_name",
+                        f"Reactome Pathways{' — '+_ctx_sfx if _ctx_sfx else ''}",
+                        gene_color="#4E79A7", term_color="#59A14F")
+                    if _fig_react:
+                        _plot_html += "<h2>Reactome Pathways</h2>"
+                        _plot_html += pio.to_html(_fig_react, full_html=False, include_plotlyjs="cdn")
+
+                # ── Per-gene summaries ────────────────────────────────────────
+                _ok_results = [r for r in _results if r.get("status") == "OK"]
+                _gene_html  = ["<h2>Gene Summaries</h2>"]
+                for r in _ok_results:
+                    pname  = r.get("protein_name","N/A")
+                    header = r["gene"] + (f" — {pname}" if pname and pname != "N/A" else "")
+                    _gene_html.append(f"<h3>{html_lib.escape(header)}</h3>")
+                    for k, label in [
+                        ("official_full_name","Official full name"),
+                        ("uniprot_id","UniProt accession"),
+                        ("ensembl_gene_id","Ensembl gene ID"),
+                        ("refseq_summary","RefSeq summary"),
+                        ("pathway_summary","Pathway summary"),
+                    ]:
+                        val = r.get(k)
+                        if val and str(val) not in ("N/A","None",""):
+                            _gene_html.append(f"<p><b>{label}:</b> {html_lib.escape(str(val))}</p>")
+                    if r.get("ranking_position") is not None:
+                        _gene_html.append(
+                            f"<p><b>Ranking context:</b> #{r['ranking_position']} of {len(_ok_results)} "
+                            f"({r.get('ranking_label','score')} = {r.get('ranking_score','N/A')})</p>"
+                        )
+                    val = r.get("llm_summary_papers")
+                    if val and str(val) not in ("N/A","None",""):
+                        _gene_html.append(f"<p><b>Literature synthesis:</b> {html_lib.escape(str(val))}</p>")
+                    refs = r.get("references","")
+                    if refs and refs not in ("N/A",""):
+                        _gene_html.append("<p><b>References:</b></p><ul>")
+                        for line in refs.split("\n"):
+                            _gene_html.append(f"<li>{html_lib.escape(line)}</li>")
+                        _gene_html.append("</ul>")
+
+                # ── LLM Synthesis sections ────────────────────────────────────
+                _synth_html = []
+                for key, title in [("9a","Biological Synthesis"),("9b","Therapeutic Landscape"),
+                                    ("9c","Experimental Proposals"),("9d","Top Target Summary")]:
+                    if _synth_results.get(key):
+                        try:
+                            import markdown as md_lib
+                            _synth_html.append(f"<h2>{title}</h2>")
+                            _synth_html.append(md_lib.markdown(
+                                _synth_results[key], extensions=["tables","fenced_code"]))
+                        except ImportError:
+                            _synth_html.append(f"<h2>{title}</h2><pre>{html_lib.escape(_synth_results[key])}</pre>")
+                    if _synth_tables.get(key):
+                        try:
+                            import markdown as md_lib
+                            _synth_html.append(md_lib.markdown(
+                                _synth_tables[key], extensions=["tables","fenced_code"]))
+                        except ImportError:
+                            _synth_html.append(f"<pre>{html_lib.escape(_synth_tables[key])}</pre>")
+
+                _full_body = (
+                    "\n".join(_meta_lines) +
+                    _plot_html +
+                    "\n".join(_gene_html) +
+                    "\n".join(_synth_html)
+                )
+
+                return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GOAT — Gene Research Report</title>
   <style>
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      max-width: 960px; margin: 40px auto; padding: 0 24px;
-      color: #1a1a2e; line-height: 1.7; background: #fafafa;
-    }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+             max-width: 1100px; margin: 40px auto; padding: 0 24px;
+             color: #1a1a2e; line-height: 1.7; background: #fafafa; }}
     h1 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 12px; }}
     h2 {{ color: #2980b9; border-bottom: 1px solid #bdc3c7; padding-bottom: 6px; margin-top: 40px; }}
     h3 {{ color: #27ae60; margin-top: 28px; }}
-    table {{
-      border-collapse: collapse; width: 100%; margin: 16px 0;
-      font-size: 0.9em; box-shadow: 0 1px 4px rgba(0,0,0,0.1);
-    }}
-    th {{
-      background: #2980b9; color: white; padding: 10px 14px;
-      text-align: left; font-weight: 600;
-    }}
+    table {{ border-collapse: collapse; width: 100%; margin: 16px 0;
+             font-size: 0.9em; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }}
+    th {{ background: #2980b9; color: white; padding: 10px 14px; text-align: left; font-weight: 600; }}
     td {{ padding: 8px 14px; border-bottom: 1px solid #ecf0f1; }}
     tr:nth-child(even) {{ background: #f8f9fa; }}
     tr:hover {{ background: #eaf4fb; }}
     code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.88em; }}
     pre {{ background: #f0f0f0; padding: 14px; border-radius: 6px; overflow-x: auto; }}
-    ul {{ padding-left: 24px; }}
-    li {{ margin-bottom: 4px; }}
+    blockquote {{ border-left: 4px solid #3498db; margin: 0; padding: 8px 16px; background: #eaf4fb; }}
     hr {{ border: none; border-top: 1px solid #bdc3c7; margin: 32px 0; }}
-    .toc {{ background: #eaf4fb; border-left: 4px solid #3498db;
-             padding: 16px 24px; border-radius: 4px; margin-bottom: 32px; }}
+    ul {{ padding-left: 24px; }} li {{ margin-bottom: 4px; }}
   </style>
 </head>
 <body>
-{html_body}
+{_full_body}
 </body>
 </html>"""
 
-        # ── Download buttons (all pre-built, no re-run triggered) ─────────────
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            csv_buf = StringIO()
-            df_export[csv_cols].to_csv(csv_buf, index=False)
-            st.download_button(
-                label="⬇️ Main CSV",
-                data=csv_buf.getvalue(),
-                file_name=f"{prefix}_gene_research.csv",
-                mime="text/csv",
-                key="dl_csv",
-            )
-
-        with col2:
-            if _go_bp_data:
-                go_buf = StringIO()
-                pd.DataFrame(_go_bp_data).to_csv(go_buf, index=False)
-                st.download_button(
-                    label="⬇️ GO terms CSV",
-                    data=go_buf.getvalue(),
-                    file_name=f"{prefix}_go_bp_terms.csv",
-                    mime="text/csv",
-                    key="dl_go_csv",
-                )
-
-        with col3:
-            st.download_button(
-                label="⬇️ Markdown report",
-                data=md_content,
-                file_name=f"{prefix}_research_report.md",
-                mime="text/markdown",
-                key="dl_md",
-            )
-
-        with col4:
             st.download_button(
                 label="⬇️ HTML report",
-                data=html_content,
+                data=_build_html_report(),
                 file_name=f"{prefix}_research_report.html",
                 mime="text/html",
                 key="dl_html",
             )
 
-        st.info("💡 The HTML report can be opened directly in any browser and shared with colleagues who don't have Python installed.")
+        st.info("💡 The HTML report includes embedded GO/Reactome plots and can be opened in any browser.")
 
     # ── Tab 8: About ──────────────────────────────────────────────────────────
     with tabs[7]:
-        # ── Usage graph ───────────────────────────────────────────────────────
         _usage_data = _load_usage_log()
         if _usage_data:
             import plotly.express as px
             _udf = pd.DataFrame(_usage_data)
             _udf["date"] = pd.to_datetime(_udf["date"])
             _udf = _udf.sort_values("date")
-            _udf["cumulative_runs"] = range(1, len(_udf) + 1)
-            _fig = px.line(
-                _udf, x="date", y="cumulative_runs",
-                labels={"date": "Date", "cumulative_runs": "Cumulative runs"},
-                title="GOAT usage over time",
-                markers=True,
-            )
-            _fig.update_layout(
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                yaxis=dict(tickformat="d", rangemode="tozero"),
-            )
-            st.plotly_chart(_fig, width="stretch")
+            _udf["cumulative_runs"]  = range(1, len(_udf) + 1)
+            _udf["cumulative_genes"] = _udf["gene_count"].cumsum()
+
+            _col_r, _col_g = st.columns(2)
+
+            with _col_r:
+                _fig_runs = px.line(
+                    _udf, x="date", y="cumulative_runs",
+                    labels={"date": "Date", "cumulative_runs": "Cumulative runs"},
+                    title="GOAT usage over time",
+                    markers=True,
+                )
+                _fig_runs.update_layout(
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    yaxis=dict(tickformat="d", rangemode="tozero"),
+                )
+                st.plotly_chart(_fig_runs, use_container_width=True)
+
+            with _col_g:
+                _fig_genes = px.line(
+                    _udf, x="date", y="cumulative_genes",
+                    labels={"date": "Date", "cumulative_genes": "Cumulative genes processed"},
+                    title="Genes processed over time",
+                    markers=True,
+                    color_discrete_sequence=["#F28E2B"],
+                )
+                _fig_genes.update_layout(
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    yaxis=dict(tickformat="d", rangemode="tozero"),
+                )
+                st.plotly_chart(_fig_genes, use_container_width=True)
         else:
             st.info("No usage data yet — run the pipeline to start tracking.")
 
@@ -2130,7 +2469,6 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
 
         st.divider()
 
-        # ── Developer credits ──────────────────────────────────────────────────
         st.subheader("About GOAT")
         st.markdown("""
 **Developed by**
@@ -2147,7 +2485,6 @@ For more information, please visit:
         """)
 
 else:
-    # Landing state — shown before run
     st.info("👈 Fill in the configuration in the sidebar, then click **▶ Run GOAT** to start the pipeline.")
     st.markdown("""
     **What GOAT does, step by step:**
@@ -2160,5 +2497,5 @@ else:
     7. *(Optional)* **ClinicalTrials.gov** — active clinical trials
     8. *(Optional)* **GWAS Catalog** — genetic association evidence
     9. **Cross-gene LLM synthesis** — biological, therapeutic, experimental, and target prioritisation reports
-    10. **Export** — CSV, Markdown, and HTML report downloads
+    10. **Export** — CSV, GO terms CSV, and HTML report with embedded enrichment plots
     """)
