@@ -164,7 +164,7 @@ with st.sidebar:
 
         # ── LLM connection check ──────────────────────────────────────────
         _llm_ready = bool(API_KEY) or PROVIDER == "denbi"
-        if st.button("Check LLM connection", key="llm_check_btn",
+        if st.button("Check LLM connection", key="llm_check_btn_billy",
                      disabled=not _llm_ready,
                      help=None if _llm_ready else "Enter your API key first"):
             try:
@@ -291,7 +291,7 @@ with st.sidebar:
 
         # ── LLM connection check ──────────────────────────────────────────
         _llm_ready = bool(API_KEY) or PROVIDER == "denbi"
-        if st.button("Check LLM connection", key="llm_check_btn",
+        if st.button("Check LLM connection", key="llm_check_btn_goat",
                      disabled=not _llm_ready,
                      help=None if _llm_ready else "Enter your API key first"):
             try:
@@ -647,43 +647,22 @@ with st.sidebar:
         help="Select a profile first." if not profile_set else None,
     )
 
-# ── Soft-confirm dialog when known API failures exist ────────────────────────
-@st.dialog("⚠️ API connectivity issues detected")
-def _confirm_run_with_failures():
-    st.write(
-        "One or more APIs failed their connectivity check. "
-        "You can review the results in the **API Status** section of the sidebar. "
-        "Continue anyway?"
+# ── Inline warnings for known connectivity failures ───────────────────────────
+if st.session_state.api_check_results:
+    _critical_failures = [
+        name for name, (ok, _) in st.session_state.api_check_results.items()
+        if not ok and name in {"NCBI Gene", "PubMed", "UniProt"}
+    ]
+    if _critical_failures:
+        st.warning(
+            f"⚠️ Critical API(s) unreachable: **{', '.join(_critical_failures)}**. "
+            "Review the API Status section in the sidebar before running."
+        )
+
+if st.session_state.llm_check_result is not None and not st.session_state.llm_check_result[0]:
+    st.warning(
+        "⚠️ LLM connection check failed. Review your provider settings in the sidebar before running."
     )
-    _col1, _col2 = st.columns(2)
-    if _col1.button("Continue", type="primary", key="dialog_continue"):
-        st.session_state._confirmed_run = True
-        st.rerun()
-    if _col2.button("Cancel", key="dialog_cancel"):
-        st.session_state._confirmed_run = False
-        st.rerun()
-
-# Initialise the confirmed-run flag if absent
-if "_confirmed_run" not in st.session_state:
-    st.session_state._confirmed_run = None
-
-# Determine whether any API check has failed
-_api_failures = [
-    name for name, (ok, _) in st.session_state.api_check_results.items() if not ok
-] if st.session_state.api_check_results else []
-_llm_failed = (
-    st.session_state.llm_check_result is not None
-    and not st.session_state.llm_check_result[0]
-)
-_has_failures = bool(_api_failures) or _llm_failed
-
-# On button click: open dialog if failures exist and not yet confirmed; else proceed
-if run_button:
-    if _has_failures and st.session_state._confirmed_run is None:
-        _confirm_run_with_failures()
-    else:
-        # Reset confirmation state so next run starts clean
-        st.session_state._confirmed_run = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -1416,9 +1395,8 @@ def build_wordcloud_fig(df, label_col, title):
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN — run pipeline when button is clicked
-# Proceeds when: (a) no API failures known, or (b) user confirmed via dialog
 # ══════════════════════════════════════════════════════════════════════════════
-if run_button and (not _has_failures or st.session_state._confirmed_run is True):
+if run_button:
     # ── Validation ────────────────────────────────────────────────────────────
     errors = []
     raw_genes = genes_raw.replace("\n", ",")
