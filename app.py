@@ -1371,12 +1371,41 @@ def build_sankey_fig(df, label_col, title, min_shared=2,
     return fig
 
 
+_WC_STOPWORDS = {
+    # Generic English
+    "of","the","a","an","by","via","to","in","at","for","and","or","with",
+    "from","into","through","between","upon","on","its",
+    # Generic biological process words
+    "regulation","positive","negative","process","activity","response",
+    "involved","mediated","dependent","associated","based","related",
+    "induced","driven","pathway","signaling","mechanism",
+    # Directionality/modifier
+    "up","down","increased","decreased","enhanced","reduced",
+    "inhibition","activation","suppression","promotion",
+    # Cellular location generics
+    "cellular","intracellular","extracellular","cytoplasmic","nuclear","membrane",
+}
+
+def _tokenise_terms(df, label_col):
+    """Tokenise term labels into words, weighted by gene count per term.
+    Returns a dict of {word: frequency} with stop words removed."""
+    term_gene_counts = df.groupby(label_col)["gene"].nunique()
+    word_freq = {}
+    for term, count in term_gene_counts.items():
+        if not term:
+            continue
+        for word in re.split(r"[\s\-/]+", term.lower()):
+            word = re.sub(r"[^a-z0-9]", "", word)
+            if word and word not in _WC_STOPWORDS and len(word) > 2:
+                word_freq[word] = word_freq.get(word, 0) + int(count)
+    return word_freq
+
+
 def build_wordcloud_fig(df, label_col, title):
-    """Build a word cloud from term frequencies across genes."""
+    """Build a matplotlib word cloud for display in Streamlit (in-app only)."""
     if df.empty or not _WORDCLOUD_AVAILABLE:
         return None
-    term_counts = df.groupby(label_col)["gene"].nunique()
-    freq_dict   = {term: int(count) for term, count in term_counts.items() if term}
+    freq_dict = _tokenise_terms(df, label_col)
     if not freq_dict:
         return None
     wc = WordCloud(
@@ -1390,6 +1419,68 @@ def build_wordcloud_fig(df, label_col, title):
     ax.set_title(title, fontsize=11, pad=8)
     fig.patch.set_alpha(0.0)
     plt.tight_layout(pad=0.5)
+    return fig
+
+
+def build_wordcloud_plotly(df, label_col, title):
+    """Build an interactive Plotly scatter word cloud for HTML export.
+    No wordcloud library needed — uses only plotly and random placement."""
+    if df.empty:
+        return None
+    freq_dict = _tokenise_terms(df, label_col)
+    if not freq_dict:
+        return None
+    import math, random
+    random.seed(42)
+    max_freq = max(freq_dict.values())
+    min_freq = min(freq_dict.values())
+    # Sort by frequency descending, cap at 60 words
+    words = sorted(freq_dict.items(), key=lambda x: x[1], reverse=True)[:60]
+    # Spiral placement to avoid overlap
+    xs, ys, texts, sizes, freqs = [], [], [], [], []
+    placed = []
+    angle, radius = 0.0, 0.0
+    for word, freq in words:
+        norm = (freq - min_freq) / max(max_freq - min_freq, 1)
+        font_size = 10 + int(norm * 30)
+        # Estimate word width/height in plot units
+        w = len(word) * font_size * 0.012
+        h = font_size * 0.022
+        # Spiral outward until no overlap
+        for _ in range(500):
+            x = radius * math.cos(angle) + random.uniform(-0.05, 0.05)
+            y = radius * math.sin(angle) + random.uniform(-0.05, 0.05)
+            overlap = any(
+                abs(x - px) < (w + pw) / 2 and abs(y - py) < (h + ph) / 2
+                for px, py, pw, ph in placed
+            )
+            if not overlap:
+                break
+            angle += 0.5
+            radius += 0.015
+        placed.append((x, y, w, h))
+        xs.append(x); ys.append(y)
+        texts.append(word); sizes.append(font_size); freqs.append(freq)
+
+    # Colour by frequency using tab10-like palette
+    colours = [
+        f"hsl({int(220 + 140 * (f - min_freq) / max(max_freq - min_freq, 1))},65%,45%)"
+        for f in freqs
+    ]
+    fig = go_plot.Figure(go_plot.Scatter(
+        x=xs, y=ys, mode="text",
+        text=texts,
+        textfont=dict(size=sizes, color=colours),
+        hovertemplate=[f"<b>{w}</b><br>frequency: {f}<extra></extra>"
+                       for w, f in zip(texts, freqs)],
+    ))
+    fig.update_layout(
+        title_text=title, title_font_size=13,
+        xaxis=dict(showgrid=False, zeroline=False, visible=False),
+        yaxis=dict(showgrid=False, zeroline=False, visible=False, scaleanchor="x"),
+        height=380, margin=dict(l=10, r=10, t=40, b=10),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+    )
     return fig
 
 
@@ -1651,7 +1742,7 @@ if st.session_state.pipeline_done:
                 _go_sankey = build_sankey_fig(df_go, "go_term",
                     f"GO Biological Process{' — '+context_suffix if context_suffix else ''}",
                     gene_color="#4E79A7", term_color="#F28E2B")
-                _go_wc = build_wordcloud_fig(df_go, "go_term",
+                _go_wc = build_wordcloud_plotly(df_go, "go_term",
                     f"GO BP Term Frequency{' — '+context_suffix if context_suffix else ''}")
                 if _go_sankey or _go_wc:
                     _col_s, _col_w = st.columns([1, 1])
@@ -1662,9 +1753,7 @@ if st.session_state.pipeline_done:
                             st.info("Sankey unavailable.")
                     with _col_w:
                         if _go_wc:
-                            st.pyplot(_go_wc, use_container_width=True)
-                        elif not _WORDCLOUD_AVAILABLE:
-                            st.info("Install `wordcloud` library for word clouds.")
+                            st.plotly_chart(_go_wc, use_container_width=True)
                         else:
                             st.info("Word cloud unavailable.")
                 st.dataframe(df_go, width="stretch")
@@ -1674,7 +1763,7 @@ if st.session_state.pipeline_done:
                 _react_sankey = build_sankey_fig(df_reactome, "pathway_name",
                     f"Reactome Pathways{' — '+context_suffix if context_suffix else ''}",
                     gene_color="#4E79A7", term_color="#59A14F")
-                _react_wc = build_wordcloud_fig(df_reactome, "pathway_name",
+                _react_wc = build_wordcloud_plotly(df_reactome, "pathway_name",
                     f"Reactome Pathway Frequency{' — '+context_suffix if context_suffix else ''}")
                 if _react_sankey or _react_wc:
                     _col_s, _col_w = st.columns([1, 1])
@@ -1685,9 +1774,7 @@ if st.session_state.pipeline_done:
                             st.info("Sankey unavailable.")
                     with _col_w:
                         if _react_wc:
-                            st.pyplot(_react_wc, use_container_width=True)
-                        elif not _WORDCLOUD_AVAILABLE:
-                            st.info("Install `wordcloud` library for word clouds.")
+                            st.plotly_chart(_react_wc, use_container_width=True)
                         else:
                             st.info("Word cloud unavailable.")
                 st.dataframe(df_reactome, width="stretch")
@@ -2081,6 +2168,13 @@ Table columns: | # | Experiment type | Model system | Perturbation | Primary rea
                             synthesis_results["9c"] = text
                             run_metrics["9c"] = {"tokens": tok, "runtime": rt}
 
+                    _has_ranking = bool(st.session_state.get("ranked_gene_scores"))
+                    _rank_col    = " Ranking Position |" if _has_ranking else ""
+                    _rank_note   = (
+                        f"\n- The input gene list was provided as a ranked list ({RANKED_SCORE_LABEL}). "
+                        "Include the gene's ranking position from the per-gene data in the table."
+                        if _has_ranking else ""
+                    )
                     SYS_9D = f"""You are a drug discovery scientist {persona_context}, synthesising all available evidence across biological, therapeutic, and disease association layers to produce a final integrated target prioritisation for a research team.
 
 CONSTRAINTS (apply to every section):
@@ -2091,7 +2185,7 @@ CONSTRAINTS (apply to every section):
     3. Mechanistic specificity — how well-characterised is the gene's role in the disease pathway.
 - Overall priority values are strictly: High / Medium / Low. No intermediate values.
 - Aim for concision — this is an orientation document for a research team, not an exhaustive review.
-- If a section cannot be supported by the data, write: "Insufficient data to assess."
+- If a section cannot be supported by the data, write: "Insufficient data to assess."{_rank_note}
 
 TASK: Produce an integrated target prioritisation for the provided gene set in the context of {context_desc}.
 
@@ -2106,7 +2200,7 @@ Exactly 4 sentences:
 
 ## Top target summary
 Rank at least 5 but up to 10 targets with available evidence.
-Table columns: | Rank | Gene | Protein name | Disease association and GWAS | Therapeutic evidence | Mechanistic specificity | Overall priority |"""
+Table columns: | Rank | Gene | Protein name |{_rank_col} Disease association and GWAS | Therapeutic evidence | Mechanistic specificity | Overall priority |"""
 
                     prior_9abd = prior_9ab
                     if synthesis_results.get("9c"):
@@ -2207,10 +2301,31 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
         _synth_tables  = st.session_state.synthesis_tables
 
         df_export = pd.DataFrame(_results)
+
+        # ── Merge GO and Reactome IDs into main df as semicolon-separated columns ──
+        if _go_bp_data:
+            _go_ids_by_gene = {}
+            for row in _go_bp_data:
+                _go_ids_by_gene.setdefault(row["gene"], []).append(row["go_id"])
+            df_export["GO_Terms"] = df_export["gene"].map(
+                lambda g: "; ".join(_go_ids_by_gene.get(g, [])) or "")
+        else:
+            df_export["GO_Terms"] = ""
+
+        if _reactome_data:
+            _react_ids_by_gene = {}
+            for row in _reactome_data:
+                _react_ids_by_gene.setdefault(row["gene"], []).append(row["reactome_id"])
+            df_export["Reactome_Pathways"] = df_export["gene"].map(
+                lambda g: "; ".join(_react_ids_by_gene.get(g, [])) or "")
+        else:
+            df_export["Reactome_Pathways"] = ""
+
         EXPORT_COLS = [
             "gene","official_full_name","uniprot_id","protein_name","ensembl_gene_id",
             "ranking_position","ranking_score","ranking_label",
-            "refseq_summary","pathway_summary","llm_summary_papers","references",
+            "refseq_summary","pathway_summary","GO_Terms","Reactome_Pathways",
+            "llm_summary_papers","references",
             "search_window_used","articles_found","chembl_molecules","ot_disease_association",
             "active_trials","trial_phases","gwas_hits","gwas_traits","status"
         ]
@@ -2222,7 +2337,7 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
         safe_ctx = re.sub(r"[^\w\-]", "_", DISEASE_CONTEXT or "no_context")
         prefix   = f"{ts}_{ANALYSIS_NAME}_{safe_ctx}"
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
 
         # ── 1. Main CSV ───────────────────────────────────────────────────────
         with col1:
@@ -2236,24 +2351,8 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                 key="dl_csv",
             )
 
-        # ── 2. GO terms CSV ───────────────────────────────────────────────────
+        # ── 2. HTML report (with embedded plots, built lazily) ────────────────
         with col2:
-            if _go_bp_data:
-                _go_buf = StringIO()
-                pd.DataFrame(_go_bp_data).to_csv(_go_buf, index=False)
-                st.download_button(
-                    label="⬇️ GO terms CSV",
-                    data=_go_buf.getvalue(),
-                    file_name=f"{prefix}_go_bp_terms.csv",
-                    mime="text/csv",
-                    key="dl_go_csv",
-                )
-            else:
-                st.button("⬇️ GO terms CSV", disabled=True, key="dl_go_csv_disabled",
-                          help="No GO data available.")
-
-        # ── 3. HTML report (with embedded plots, built lazily) ────────────────
-        with col3:
             def _build_html_report():
                 import plotly.io as pio
                 _meta_lines = [
@@ -2281,17 +2380,31 @@ Table columns: | Rank | Gene | Protein name | Disease association and GWAS | The
                     _fig_go = build_sankey_fig(_df_go_ex, "go_term",
                         f"GO Biological Process{' — '+_ctx_sfx if _ctx_sfx else ''}",
                         gene_color="#4E79A7", term_color="#F28E2B")
-                    if _fig_go:
+                    _fig_go_wc = build_wordcloud_plotly(_df_go_ex, "go_term",
+                        f"GO BP Term Frequency{' — '+_ctx_sfx if _ctx_sfx else ''}")
+                    if _fig_go or _fig_go_wc:
                         _plot_html += "<h2>GO Biological Process</h2>"
-                        _plot_html += pio.to_html(_fig_go, full_html=False, include_plotlyjs="cdn")
+                        _plot_html += "<div style='display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;'>"
+                        if _fig_go:
+                            _plot_html += f"<div style='flex:1;min-width:400px;'>{pio.to_html(_fig_go, full_html=False, include_plotlyjs='cdn')}</div>"
+                        if _fig_go_wc:
+                            _plot_html += f"<div style='flex:1;min-width:320px;'>{pio.to_html(_fig_go_wc, full_html=False, include_plotlyjs=False)}</div>"
+                        _plot_html += "</div>"
 
                 if not _df_react_ex.empty:
                     _fig_react = build_sankey_fig(_df_react_ex, "pathway_name",
                         f"Reactome Pathways{' — '+_ctx_sfx if _ctx_sfx else ''}",
                         gene_color="#4E79A7", term_color="#59A14F")
-                    if _fig_react:
+                    _fig_react_wc = build_wordcloud_plotly(_df_react_ex, "pathway_name",
+                        f"Reactome Pathway Frequency{' — '+_ctx_sfx if _ctx_sfx else ''}")
+                    if _fig_react or _fig_react_wc:
                         _plot_html += "<h2>Reactome Pathways</h2>"
-                        _plot_html += pio.to_html(_fig_react, full_html=False, include_plotlyjs="cdn")
+                        _plot_html += "<div style='display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;'>"
+                        if _fig_react:
+                            _plot_html += f"<div style='flex:1;min-width:400px;'>{pio.to_html(_fig_react, full_html=False, include_plotlyjs=False)}</div>"
+                        if _fig_react_wc:
+                            _plot_html += f"<div style='flex:1;min-width:320px;'>{pio.to_html(_fig_react_wc, full_html=False, include_plotlyjs=False)}</div>"
+                        _plot_html += "</div>"
 
                 # ── Per-gene summaries ────────────────────────────────────────
                 _ok_results = [r for r in _results if r.get("status") == "OK"]
