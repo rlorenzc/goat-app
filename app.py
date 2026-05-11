@@ -9,6 +9,7 @@ from datetime import datetime, date
 from io import StringIO, BytesIO
 import requests
 import pandas as pd
+import plotly.graph_objects as go_plot
 from openai import OpenAI
 from dotenv import load_dotenv
 try:
@@ -1341,7 +1342,6 @@ def search_gwas(gene, MAX_SNPS=5, MAX_ASSOCS_PER_SNP=3, log=print):
 # ── Sankey (Plotly) ───────────────────────────────────────────────────────────
 def build_sankey_fig(df, label_col, title, min_shared=2,
                      gene_color="#4E79A7", term_color="#F28E2B", max_terms=40):
-    import plotly.graph_objects as go_plot
     if df.empty:
         return None
     term_counts  = df.groupby(label_col)["gene"].nunique()
