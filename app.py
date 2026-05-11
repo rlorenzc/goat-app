@@ -132,10 +132,10 @@ with st.sidebar:
         )
 
         if billy_provider == "deNBI":
-            denbi_pw = st.text_input("deNBI passphrase", type="password",
-                                     placeholder="Enter deNBI passphrase", key="denbi_pw_billy")
-            if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
-                st.error("Incorrect deNBI passphrase.")
+            denbi_pw = st.text_input("deNBI passphrase or API key", type="password",
+                                     placeholder="Enter deNBI passphrase or API key", key="denbi_pw_billy")
+            if denbi_pw and denbi_pw not in (_DENBI_PASSPHRASE, _DENBI_API_KEY):
+                st.error("Incorrect deNBI passphrase or API key.")
             denbi_model_key = st.selectbox(
                 "Model", options=list(DENBI_MODELS.keys()),
                 format_func=lambda k: DENBI_MODELS[k], key="billy_denbi_model",
@@ -205,10 +205,10 @@ with st.sidebar:
         )
 
         if mg_provider == "deNBI":
-            denbi_pw = st.text_input("deNBI passphrase", type="password",
-                                     placeholder="Enter deNBI passphrase", key="denbi_pw_goat")
-            if denbi_pw and denbi_pw != _DENBI_PASSPHRASE:
-                st.error("Incorrect deNBI passphrase.")
+            denbi_pw = st.text_input("deNBI passphrase or API key", type="password",
+                                     placeholder="Enter deNBI passphrase or API key", key="denbi_pw_goat")
+            if denbi_pw and denbi_pw not in (_DENBI_PASSPHRASE, _DENBI_API_KEY):
+                st.error("Incorrect deNBI passphrase or API key.")
             denbi_model_opts = list(DENBI_MODELS.keys()) + ["Custom model"]
             denbi_model_sel  = st.selectbox(
                 "Model", options=denbi_model_opts,
