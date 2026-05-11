@@ -135,15 +135,13 @@ with st.sidebar:
         if billy_provider == "deNBI":
             denbi_pw = st.text_input("deNBI passphrase or API key", type="password",
                                      placeholder="Enter deNBI passphrase or API key", key="denbi_pw_billy")
-            if denbi_pw and denbi_pw not in (_DENBI_PASSPHRASE, _DENBI_API_KEY):
-                st.error("Incorrect deNBI passphrase or API key.")
             denbi_model_key = st.selectbox(
                 "Model", options=list(DENBI_MODELS.keys()),
                 format_func=lambda k: DENBI_MODELS[k], key="billy_denbi_model",
             )
             LLM_BASE_URL = DENBI_BASE_URL
             LLM_MODEL    = denbi_model_key
-            API_KEY      = _DENBI_API_KEY
+            API_KEY      = _DENBI_API_KEY if denbi_pw in (_DENBI_PASSPHRASE, _DENBI_API_KEY) else ""
             PROVIDER     = "denbi"
 
         else:  # Groq
@@ -176,7 +174,12 @@ with st.sidebar:
                     max_tokens=1, timeout=15)
                 st.session_state.llm_check_result = (True, int((time.time() - _t0) * 1000))
             except Exception as _e:
-                st.session_state.llm_check_result = (False, str(_e))
+                _err = str(_e)
+                if "missing api key" in _err.lower() or "401" in _err or "unauthorized" in _err.lower():
+                    _err = "Invalid or missing credentials — check your passphrase or API key."
+                elif "connection" in _err.lower() or "timeout" in _err.lower():
+                    _err = "Could not reach the provider — check your network or provider URL."
+                st.session_state.llm_check_result = (False, _err)
 
         if st.session_state.llm_check_result is not None:
             _lok, _ldetail = st.session_state.llm_check_result
@@ -208,8 +211,6 @@ with st.sidebar:
         if mg_provider == "deNBI":
             denbi_pw = st.text_input("deNBI passphrase or API key", type="password",
                                      placeholder="Enter deNBI passphrase or API key", key="denbi_pw_goat")
-            if denbi_pw and denbi_pw not in (_DENBI_PASSPHRASE, _DENBI_API_KEY):
-                st.error("Incorrect deNBI passphrase or API key.")
             denbi_model_opts = list(DENBI_MODELS.keys()) + ["Custom model"]
             denbi_model_sel  = st.selectbox(
                 "Model", options=denbi_model_opts,
@@ -220,7 +221,7 @@ with st.sidebar:
             else:
                 LLM_MODEL = denbi_model_sel
             LLM_BASE_URL = DENBI_BASE_URL
-            API_KEY      = _DENBI_API_KEY
+            API_KEY      = _DENBI_API_KEY if denbi_pw in (_DENBI_PASSPHRASE, _DENBI_API_KEY) else ""
             PROVIDER     = "denbi"
 
         elif mg_provider == "Anthropic":
@@ -303,7 +304,12 @@ with st.sidebar:
                     max_tokens=1, timeout=15)
                 st.session_state.llm_check_result = (True, int((time.time() - _t0) * 1000))
             except Exception as _e:
-                st.session_state.llm_check_result = (False, str(_e))
+                _err = str(_e)
+                if "missing api key" in _err.lower() or "401" in _err or "unauthorized" in _err.lower():
+                    _err = "Invalid or missing credentials — check your passphrase or API key."
+                elif "connection" in _err.lower() or "timeout" in _err.lower():
+                    _err = "Could not reach the provider — check your network or provider URL."
+                st.session_state.llm_check_result = (False, _err)
 
         if st.session_state.llm_check_result is not None:
             _lok, _ldetail = st.session_state.llm_check_result
@@ -1498,8 +1504,8 @@ if run_button:
         errors.append("Organism is required.")
     if not ANALYSIS_NAME.strip():
         errors.append("Analysis name is required.")
-    if PROVIDER != "denbi" and not API_KEY:
-        errors.append("API key is required for this provider.")
+    if not API_KEY:
+        errors.append("API key is required. For deNBI, enter your passphrase or API key in the sidebar.")
     if PROVIDER == "custom" and (not LLM_BASE_URL or not LLM_MODEL):
         errors.append("Custom provider requires Base URL and Model name.")
 
