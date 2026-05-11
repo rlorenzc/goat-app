@@ -141,7 +141,7 @@ with st.sidebar:
             )
             LLM_BASE_URL = DENBI_BASE_URL
             LLM_MODEL    = denbi_model_key
-            API_KEY      = _DENBI_API_KEY if denbi_pw in (_DENBI_PASSPHRASE, _DENBI_API_KEY) else ""
+            API_KEY      = _DENBI_API_KEY if denbi_pw == _DENBI_PASSPHRASE else (denbi_pw if denbi_pw else "")
             PROVIDER     = "denbi"
 
         else:  # Groq
@@ -221,7 +221,7 @@ with st.sidebar:
             else:
                 LLM_MODEL = denbi_model_sel
             LLM_BASE_URL = DENBI_BASE_URL
-            API_KEY      = _DENBI_API_KEY if denbi_pw in (_DENBI_PASSPHRASE, _DENBI_API_KEY) else ""
+            API_KEY      = _DENBI_API_KEY if denbi_pw == _DENBI_PASSPHRASE else (denbi_pw if denbi_pw else "")
             PROVIDER     = "denbi"
 
         elif mg_provider == "Anthropic":
