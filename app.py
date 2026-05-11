@@ -2390,11 +2390,13 @@ Table columns: | Rank | Gene | Protein name |{_rank_col} Disease association and
                         f"GO BP Term Frequency{' — '+_ctx_sfx if _ctx_sfx else ''}")
                     if _fig_go or _fig_go_wc:
                         _plot_html += "<h2>GO Biological Process</h2>"
-                        _plot_html += "<div style='display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;'>"
+                        _plot_html += "<div style='display:flex;gap:16px;align-items:flex-start;'>"
                         if _fig_go:
-                            _plot_html += f"<div style='flex:1;min-width:400px;'>{pio.to_html(_fig_go, full_html=False, include_plotlyjs='cdn')}</div>"
+                            _fig_go.update_layout(width=620)
+                            _plot_html += f"<div style='width:620px;flex-shrink:0;'>{pio.to_html(_fig_go, full_html=False, include_plotlyjs='cdn')}</div>"
                         if _fig_go_wc:
-                            _plot_html += f"<div style='flex:1;min-width:320px;'>{pio.to_html(_fig_go_wc, full_html=False, include_plotlyjs=False)}</div>"
+                            _fig_go_wc.update_layout(width=440)
+                            _plot_html += f"<div style='width:440px;flex-shrink:0;'>{pio.to_html(_fig_go_wc, full_html=False, include_plotlyjs=False)}</div>"
                         _plot_html += "</div>"
 
                 if not _df_react_ex.empty:
@@ -2405,11 +2407,13 @@ Table columns: | Rank | Gene | Protein name |{_rank_col} Disease association and
                         f"Reactome Pathway Frequency{' — '+_ctx_sfx if _ctx_sfx else ''}")
                     if _fig_react or _fig_react_wc:
                         _plot_html += "<h2>Reactome Pathways</h2>"
-                        _plot_html += "<div style='display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;'>"
+                        _plot_html += "<div style='display:flex;gap:16px;align-items:flex-start;'>"
                         if _fig_react:
-                            _plot_html += f"<div style='flex:1;min-width:400px;'>{pio.to_html(_fig_react, full_html=False, include_plotlyjs=False)}</div>"
+                            _fig_react.update_layout(width=620)
+                            _plot_html += f"<div style='width:620px;flex-shrink:0;'>{pio.to_html(_fig_react, full_html=False, include_plotlyjs=False)}</div>"
                         if _fig_react_wc:
-                            _plot_html += f"<div style='flex:1;min-width:320px;'>{pio.to_html(_fig_react_wc, full_html=False, include_plotlyjs=False)}</div>"
+                            _fig_react_wc.update_layout(width=440)
+                            _plot_html += f"<div style='width:440px;flex-shrink:0;'>{pio.to_html(_fig_react_wc, full_html=False, include_plotlyjs=False)}</div>"
                         _plot_html += "</div>"
 
                 # ── Per-gene summaries ────────────────────────────────────────
