@@ -116,64 +116,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── API Status ────────────────────────────────────────────────────────────
-    st.subheader("🔌 API Status")
-    st.caption("Check connectivity to all databases before running. Results are advisory — the Run button is never blocked by this check.")
-
-    # Critical APIs (pipeline fails without them); optional APIs (modules can be skipped)
-    _CRITICAL_APIS = {"NCBI Gene", "PubMed", "UniProt"}
-
-    if st.button("Run connectivity check", key="preflight_btn", disabled=not profile_set):
-        _pf_results = {}
-        _pf_prog    = st.progress(0, text="Checking APIs...")
-
-        _api_checks = [
-            ("NCBI Gene",      lambda: requests.get(f"{NCBI_BASE}/esearch.fcgi",
-                                   params={"db":"gene","term":"TP53","retmax":1,"retmode":"json",
-                                           "email":NCBI_EMAIL}, timeout=8).raise_for_status()),
-            ("PubMed",         lambda: requests.get(f"{NCBI_BASE}/esearch.fcgi",
-                                   params={"db":"pubmed","term":"fibrosis","retmax":1,"retmode":"json",
-                                           "email":NCBI_EMAIL}, timeout=8).raise_for_status()),
-            ("UniProt",        lambda: requests.get("https://rest.uniprot.org/uniprotkb/search",
-                                   params={"query":"TP53","format":"json","size":1}, timeout=8).raise_for_status()),
-            ("iCite",          lambda: requests.get("https://icite.od.nih.gov/api/pubs",
-                                   params={"pmids":"31000001"}, timeout=8).raise_for_status()),
-            ("OpenTargets",    lambda: requests.post("https://api.platform.opentargets.org/api/v4/graphql",
-                                   json={"query":"{ meta { dataVersion { year } } }"}, timeout=10).raise_for_status()),
-            ("ClinicalTrials", lambda: requests.get("https://clinicaltrials.gov/api/v2/studies",
-                                   params={"query.term":"fibrosis","pageSize":1,"format":"json"}, timeout=10).raise_for_status()),
-            ("GWAS Catalog",   lambda: requests.get("https://www.ebi.ac.uk/gwas/rest/api/studies",
-                                   params={"size":1}, timeout=10).raise_for_status()),
-        ]
-
-        for _i, (_name, _fn) in enumerate(_api_checks):
-            _pf_prog.progress(_i / len(_api_checks), text=f"Checking {_name}...")
-            try:
-                _t0 = time.time()
-                _fn()
-                _pf_results[_name] = (True, int((time.time() - _t0) * 1000))
-            except Exception as _e:
-                _pf_results[_name] = (False, str(_e))
-
-        _pf_prog.progress(1.0, text="Done ✓")
-        st.session_state.api_check_results = _pf_results
-
-    # ── Display last check results ────────────────────────────────────────────
-    if st.session_state.api_check_results:
-        for _name, (_ok, _detail) in st.session_state.api_check_results.items():
-            _is_critical = _name in _CRITICAL_APIS
-            if _ok:
-                st.success(f"✅ {'🔴 ' if _is_critical else ''}**{_name}** — {_detail} ms")
-            else:
-                if _is_critical:
-                    st.error(f"❌ **{_name}** *(critical)* — {_detail}")
-                else:
-                    st.warning(f"⚠️ **{_name}** *(optional)* — {_detail}")
-    else:
-        st.caption("No check run yet.")
-
-    st.divider()
-
     # ── LLM provider ──────────────────────────────────────────────────────
     st.subheader("LLM Provider")
 
@@ -383,11 +325,67 @@ with st.sidebar:
             "Get a free key at [ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/)."
         )
 
+st.divider()
+
+    # ── API Status ────────────────────────────────────────────────────────────
+    st.subheader("🔌 API Status")
+    st.caption("Check connectivity to all databases before running. Results are advisory — the Run button is never blocked by this check.")
+
+    _CRITICAL_APIS = {"NCBI Gene", "PubMed", "UniProt"}
+
+    if st.button("Run connectivity check", key="preflight_btn", disabled=not profile_set):
+        _pf_results = {}
+        _pf_prog    = st.progress(0, text="Checking APIs...")
+
+        _api_checks = [
+            ("NCBI Gene",      lambda: requests.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                                   params={"db":"gene","term":"TP53","retmax":1,"retmode":"json",
+                                           "email":"research-agent@notebook.local"}, timeout=8).raise_for_status()),
+            ("PubMed",         lambda: requests.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+                                   params={"db":"pubmed","term":"fibrosis","retmax":1,"retmode":"json",
+                                           "email":"research-agent@notebook.local"}, timeout=8).raise_for_status()),
+            ("UniProt",        lambda: requests.get("https://rest.uniprot.org/uniprotkb/search",
+                                   params={"query":"TP53","format":"json","size":1}, timeout=8).raise_for_status()),
+            ("iCite",          lambda: requests.get("https://icite.od.nih.gov/api/pubs",
+                                   params={"pmids":"31000001"}, timeout=8).raise_for_status()),
+            ("OpenTargets",    lambda: requests.post("https://api.platform.opentargets.org/api/v4/graphql",
+                                   json={"query":"{ meta { dataVersion { year } } }"}, timeout=10).raise_for_status()),
+            ("ClinicalTrials", lambda: requests.get("https://clinicaltrials.gov/api/v2/studies",
+                                   params={"query.term":"fibrosis","pageSize":1,"format":"json"}, timeout=10).raise_for_status()),
+            ("GWAS Catalog",   lambda: requests.get("https://www.ebi.ac.uk/gwas/rest/api/studies",
+                                   params={"size":1}, timeout=10).raise_for_status()),
+        ]
+
+        for _i, (_name, _fn) in enumerate(_api_checks):
+            _pf_prog.progress(_i / len(_api_checks), text=f"Checking {_name}...")
+            try:
+                _t0 = time.time()
+                _fn()
+                _pf_results[_name] = (True, int((time.time() - _t0) * 1000))
+            except Exception as _e:
+                _pf_results[_name] = (False, str(_e))
+
+        _pf_prog.progress(1.0, text="Done ✓")
+        st.session_state.api_check_results = _pf_results
+
+    if st.session_state.api_check_results:
+        for _name, (_ok, _detail) in st.session_state.api_check_results.items():
+            _is_critical = _name in _CRITICAL_APIS
+            if _ok:
+                st.success(f"✅ **{_name}** — {_detail} ms")
+            else:
+                if _is_critical:
+                    st.error(f"❌ **{_name}** *(critical)* — {_detail}")
+                else:
+                    st.warning(f"⚠️ **{_name}** *(optional)* — {_detail}")
+    else:
+        st.caption("No check run yet.")
+
     st.divider()
 
     # ── Core inputs ───────────────────────────────────────────────────────────
     st.subheader("Core Inputs")
-
+    
     # ── Gene input toggle ─────────────────────────────────────────────────────
     gene_input_mode = st.radio(
         "Gene input method",
